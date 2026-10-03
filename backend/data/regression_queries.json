@@ -1,0 +1,61 @@
+{
+  "_README": [
+    "Must-work identity queries, checked against the LIVE index by scripts/regression.py.",
+    "",
+    "Deliberately SEPARATE from data/eval_set.json. The eval set is scored against the",
+    "frozen paper_chunks_eval snapshot so that measurements stay comparable over time;",
+    "adding a newly-ingested paper to it would score 0 for every system (the paper is not",
+    "in the snapshot) and would also break comparability with every number already",
+    "recorded in results.md.",
+    "",
+    "This file answers a different question: 'can the running system still find the",
+    "specific papers we have promised it can find?' That is a smoke test, not a benchmark.",
+    "Add a paper here the moment someone demonstrates the system failing to find it.",
+    "",
+    "paraphrases are how a real user would misremember the title - including the exact",
+    "wording that failed before, so a regression reproduces it rather than testing a",
+    "cleaned-up version."
+  ],
+  "queries": [
+    {
+      "id": "panel-ray-susan-drift-ensemble",
+      "paper_id": "ea58ce7027cac588a5faf0af810bf77962cfbf0f",
+      "title": "Error-weighted drift-adaptive ensemble framework for classification of streaming data",
+      "note": "Springer (Evolving Systems) 2026, Ray & Susan, DOI 10.1007/s12530-026-09810-4. No arXiv preprint and no abstract on record, so it is reachable only via the Semantic Scholar title-match path and indexable only as a title-only chunk. Both of those capabilities exist because of this paper.",
+      "paraphrases": [
+        "error weighted drift adopting ensemble framework",
+        "Error-weighted drift-adaptive ensemble framework for classification of streaming data",
+        "error weighted drift adaptive ensemble framework",
+        "the drift adaptive ensemble paper by Ray and Susan"
+      ]
+    },
+    {
+      "id": "transformer-original",
+      "paper_id": "1706.03762",
+      "title": "Attention Is All You Need",
+      "note": "The flagship demo query. Dense retrieval ranks it 1st, the cross-encoder pushed it to 11th, and the citation-centrality blend restores it. Regression here means the blend has broken.",
+      "paraphrases": [
+        "show me the original transformer paper",
+        "attention is all you need"
+      ]
+    },
+    {
+      "id": "bert-paper",
+      "paper_id": "1810.04805",
+      "title": "BERT: Pre-training of Deep Bidirectional Transformers for Language Understanding",
+      "paraphrases": [
+        "the original BERT paper",
+        "BERT pre-training of deep bidirectional transformers"
+      ]
+    },
+    {
+      "id": "lora",
+      "paper_id": "2106.09685",
+      "title": "LoRA: Low-Rank Adaptation of Large Language Models",
+      "paraphrases": [
+        "LoRA low-rank adaptation of large language models",
+        "the paper that introduced LoRA"
+      ]
+    }
+  ]
+}

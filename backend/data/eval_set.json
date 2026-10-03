@@ -1,0 +1,369 @@
+{
+  "_README": [
+    "Hand-built evaluation set. Every judged paper id was verified present in the corpus",
+    "(scripts/evaluate.py --validate re-checks this) and resolved from arXiv itself rather",
+    "than written from memory.",
+    "",
+    "Grades: 3 = this IS the paper asked for, 2 = highly relevant, 1 = marginally relevant.",
+    "Anything unjudged counts as 0.",
+    "",
+    "This file is TEST data. It must never be used to train the ranker - the training pairs",
+    "come from mined citation contexts instead. Overlap would invalidate every reported number.",
+    "",
+    "Intents are scored separately because they fail differently: text-only retrieval is",
+    "weakest on specific_paper queries, and an aggregate average hides that.",
+    "",
+    "Queries prefixed 'obscure-' are ADVERSARIAL: their correct answers sit in the 55th-96th citation percentile rather than the 99.9th, so a ranker that simply sorts by citation count cannot solve them. They exist because the original set was built from landmark papers and therefore could not detect popularity collapse."
+  ],
+  "queries": [
+    {
+      "id": "transformer-original",
+      "query": "show me the original transformer paper",
+      "intent": "specific_paper",
+      "relevant": {
+        "1706.03762": 3
+      },
+      "note": "REGRESSION TEST: returned 1803.02155 before the title-phrase search fix. The wrong paper's abstract literally says 'the Transformer introduced by Vaswani et al.', so it outscores the real paper on text similarity alone."
+    },
+    {
+      "id": "bert-paper",
+      "query": "find the BERT paper",
+      "intent": "specific_paper",
+      "relevant": {
+        "1810.04805": 3
+      }
+    },
+    {
+      "id": "resnet-paper",
+      "query": "the paper that introduced residual connections for deep networks",
+      "intent": "specific_paper",
+      "relevant": {
+        "1512.03385": 3
+      }
+    },
+    {
+      "id": "lora-paper",
+      "query": "what paper introduced LoRA low rank adaptation",
+      "intent": "specific_paper",
+      "relevant": {
+        "2106.09685": 3
+      }
+    },
+    {
+      "id": "rag-original",
+      "query": "the original retrieval augmented generation paper by Lewis",
+      "intent": "specific_paper",
+      "relevant": {
+        "2005.11401": 3
+      }
+    },
+    {
+      "id": "clip-paper",
+      "query": "learning transferable visual models from natural language supervision",
+      "intent": "specific_paper",
+      "relevant": {
+        "2103.00020": 3
+      }
+    },
+    {
+      "id": "cot-paper",
+      "query": "paper that introduced chain of thought prompting",
+      "intent": "specific_paper",
+      "relevant": {
+        "2201.11903": 3
+      }
+    },
+    {
+      "id": "gpt3-paper",
+      "query": "GPT-3 paper on few shot learning",
+      "intent": "specific_paper",
+      "relevant": {
+        "2005.14165": 3
+      }
+    },
+    {
+      "id": "vit-paper",
+      "query": "vision transformer original paper an image is worth 16x16 words",
+      "intent": "specific_paper",
+      "relevant": {
+        "2010.11929": 3
+      }
+    },
+    {
+      "id": "adam-paper",
+      "query": "the Adam optimizer paper",
+      "intent": "specific_paper",
+      "relevant": {
+        "1412.6980": 3
+      }
+    },
+    {
+      "id": "rag-factuality",
+      "query": "how does retrieval improve factual accuracy in language models",
+      "intent": "topical",
+      "relevant": {
+        "2005.11401": 3,
+        "2002.08909": 3,
+        "2004.04906": 2,
+        "2310.11511": 2
+      }
+    },
+    {
+      "id": "attention-memory",
+      "query": "methods for making attention more memory efficient",
+      "intent": "topical",
+      "relevant": {
+        "2205.14135": 3,
+        "2312.00752": 2
+      }
+    },
+    {
+      "id": "diffusion-images",
+      "query": "how do diffusion models generate images",
+      "intent": "topical",
+      "relevant": {
+        "2006.11239": 3,
+        "2112.10752": 3
+      }
+    },
+    {
+      "id": "peft",
+      "query": "techniques for parameter efficient fine tuning of large models",
+      "intent": "topical",
+      "relevant": {
+        "2106.09685": 3
+      }
+    },
+    {
+      "id": "llm-tools",
+      "query": "how can language models use external tools and APIs",
+      "intent": "topical",
+      "relevant": {
+        "2302.04761": 3,
+        "2210.03629": 3
+      }
+    },
+    {
+      "id": "normalization",
+      "query": "normalization techniques in deep neural networks",
+      "intent": "topical",
+      "relevant": {
+        "1502.03167": 3,
+        "1607.06450": 3
+      }
+    },
+    {
+      "id": "paper-embeddings",
+      "query": "how are scientific papers embedded for similarity search",
+      "intent": "topical",
+      "relevant": {
+        "2004.07180": 3,
+        "2202.06671": 3
+      }
+    },
+    {
+      "id": "distillation",
+      "query": "how does knowledge distillation work in neural networks",
+      "intent": "topical",
+      "relevant": {
+        "1503.02531": 3
+      }
+    },
+    {
+      "id": "neural-reranking",
+      "query": "neural reranking of retrieved passages for search",
+      "intent": "topical",
+      "relevant": {
+        "1901.04085": 3,
+        "2112.01488": 3
+      }
+    },
+    {
+      "id": "seq-modeling",
+      "query": "alternatives to recurrent networks for sequence modeling",
+      "intent": "topical",
+      "relevant": {
+        "1706.03762": 3,
+        "2312.00752": 3,
+        "1409.3215": 2
+      }
+    },
+    {
+      "id": "recent-ssm",
+      "query": "recent work on state space models for long sequences",
+      "intent": "recency",
+      "relevant": {
+        "2312.00752": 3
+      }
+    },
+    {
+      "id": "recent-rag-correction",
+      "query": "latest approaches to correcting bad retrieval in RAG systems",
+      "intent": "recency",
+      "relevant": {
+        "2401.15884": 3,
+        "2310.11511": 3
+      }
+    },
+    {
+      "id": "recent-hierarchical-retrieval",
+      "query": "new methods for hierarchical or tree structured document retrieval",
+      "intent": "recency",
+      "relevant": {
+        "2401.18059": 3
+      }
+    },
+    {
+      "id": "recent-segmentation",
+      "query": "recent foundation models for image segmentation",
+      "intent": "recency",
+      "relevant": {
+        "2304.02643": 3
+      }
+    },
+    {
+      "id": "bert-vs-roberta",
+      "query": "compare BERT and RoBERTa pretraining approaches",
+      "intent": "comparison",
+      "relevant": {
+        "1810.04805": 3,
+        "1907.11692": 3
+      }
+    },
+    {
+      "id": "dense-vs-late-interaction",
+      "query": "difference between dense retrieval and late interaction retrieval",
+      "intent": "comparison",
+      "relevant": {
+        "2004.04906": 3,
+        "2112.01488": 3
+      }
+    },
+    {
+      "id": "scaling-vs-instruction",
+      "query": "scaling laws versus instruction tuning for improving model capability",
+      "intent": "comparison",
+      "relevant": {
+        "2001.08361": 3,
+        "2203.02155": 3
+      }
+    },
+    {
+      "id": "transformer-vs-ssm",
+      "query": "compare transformer attention with state space models",
+      "intent": "comparison",
+      "relevant": {
+        "1706.03762": 3,
+        "2312.00752": 3
+      }
+    },
+    {
+      "id": "obscure-prompt-principles",
+      "query": "principles for writing better prompts for LLaMA models",
+      "intent": "specific_paper",
+      "relevant": {
+        "2312.16171": 3
+      },
+      "note": "ADVERSARIAL: correct answer is a modestly-cited paper, so a ranker exploiting citation counts alone cannot win this query."
+    },
+    {
+      "id": "obscure-conqrr",
+      "query": "conversational query rewriting for retrieval with reinforcement learning",
+      "intent": "specific_paper",
+      "relevant": {
+        "2112.08558": 3
+      },
+      "note": "ADVERSARIAL: correct answer is a modestly-cited paper, so a ranker exploiting citation counts alone cannot win this query."
+    },
+    {
+      "id": "obscure-pet",
+      "query": "pattern exploiting training for few shot text generation",
+      "intent": "specific_paper",
+      "relevant": {
+        "2012.11926": 3
+      },
+      "note": "ADVERSARIAL: correct answer is a modestly-cited paper, so a ranker exploiting citation counts alone cannot win this query."
+    },
+    {
+      "id": "obscure-deplot",
+      "query": "converting plots and charts into tables for visual reasoning",
+      "intent": "specific_paper",
+      "relevant": {
+        "2212.10505": 3
+      },
+      "note": "ADVERSARIAL: correct answer is a modestly-cited paper, so a ranker exploiting citation counts alone cannot win this query."
+    },
+    {
+      "id": "obscure-dspy-assertions",
+      "query": "computational constraints for self-refining language model pipelines",
+      "intent": "specific_paper",
+      "relevant": {
+        "2312.13382": 3
+      },
+      "note": "ADVERSARIAL: correct answer is a modestly-cited paper, so a ranker exploiting citation counts alone cannot win this query."
+    },
+    {
+      "id": "obscure-masker",
+      "query": "masked keyword regularization for reliable text classification",
+      "intent": "specific_paper",
+      "relevant": {
+        "2012.09392": 3
+      },
+      "note": "ADVERSARIAL: correct answer is a modestly-cited paper, so a ranker exploiting citation counts alone cannot win this query."
+    },
+    {
+      "id": "obscure-bert-relational",
+      "query": "inducing relational knowledge from BERT",
+      "intent": "specific_paper",
+      "relevant": {
+        "1911.12753": 3
+      },
+      "note": "ADVERSARIAL: correct answer is a modestly-cited paper, so a ranker exploiting citation counts alone cannot win this query."
+    },
+    {
+      "id": "obscure-rag-instruct",
+      "query": "boosting language models with diverse retrieval augmented instructions",
+      "intent": "specific_paper",
+      "relevant": {
+        "2501.00353": 3
+      },
+      "note": "ADVERSARIAL: correct answer is a modestly-cited paper, so a ranker exploiting citation counts alone cannot win this query."
+    },
+    {
+      "id": "obscure-keyword-spotting",
+      "query": "small footprint keyword spotting with graph convolutional networks",
+      "intent": "specific_paper",
+      "relevant": {
+        "1912.05124": 3
+      },
+      "note": "ADVERSARIAL: correct answer is a modestly-cited paper, so a ranker exploiting citation counts alone cannot win this query."
+    },
+    {
+      "id": "obscure-driver-takeover",
+      "query": "predicting driver takeover behaviour from multimodal data",
+      "intent": "specific_paper",
+      "relevant": {
+        "2012.15441": 3
+      },
+      "note": "ADVERSARIAL: correct answer is a modestly-cited paper, so a ranker exploiting citation counts alone cannot win this query."
+    },
+    {
+      "id": "obscure-attre2vec",
+      "query": "unsupervised attributed edge representation learning on graphs",
+      "intent": "specific_paper",
+      "relevant": {
+        "2012.14727": 3
+      },
+      "note": "ADVERSARIAL: correct answer is a modestly-cited paper, so a ranker exploiting citation counts alone cannot win this query."
+    },
+    {
+      "id": "obscure-fake-news-hypergraph",
+      "query": "relational fake news detection using hypergraph neural networks",
+      "intent": "specific_paper",
+      "relevant": {
+        "2212.12621": 3
+      },
+      "note": "ADVERSARIAL: correct answer is a modestly-cited paper, so a ranker exploiting citation counts alone cannot win this query."
+    }
+  ]
+}
