@@ -1,0 +1,76 @@
+@import "tailwindcss";
+
+:root {
+  --background: #faf9f5;
+  --surface: #ffffff;
+  --surface-muted: #f0eee6;
+  --foreground: #262521;
+  --foreground-muted: #73695c;
+  --border: #e6e2d8;
+  --accent: #c96442;
+  --accent-hover: #b2532f;
+  --accent-soft: #f3e3d8;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-surface: var(--surface);
+  --color-surface-muted: var(--surface-muted);
+  --color-foreground: var(--foreground);
+  --color-foreground-muted: var(--foreground-muted);
+  --color-border: var(--border);
+  --color-accent: var(--accent);
+  --color-accent-hover: var(--accent-hover);
+  --color-accent-soft: var(--accent-soft);
+  --font-sans: var(--font-geist-sans);
+  --font-serif: var(--font-source-serif);
+  --font-mono: var(--font-geist-mono);
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+}
+
+::selection {
+  background: var(--accent-soft);
+  color: var(--accent-hover);
+}
+
+/* Thin, theme-matched scrollbar for internal scroll regions (chat transcript, side
+   panels, expandable abstracts, wide KaTeX formulas). Explicit width reserves real
+   layout space rather than floating an overlay scrollbar on top of content - a
+   right-aligned chat bubble or list item never has a scrollbar rendered over it. */
+.scroll-area,
+.katex-display {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+}
+.scroll-area::-webkit-scrollbar,
+.katex-display::-webkit-scrollbar {
+  width: 8px;
+  height: 6px;
+}
+.scroll-area::-webkit-scrollbar-track,
+.katex-display::-webkit-scrollbar-track {
+  background: transparent;
+}
+.scroll-area::-webkit-scrollbar-thumb,
+.katex-display::-webkit-scrollbar-thumb {
+  background-color: var(--border);
+  border-radius: 999px;
+}
+.scroll-area::-webkit-scrollbar-thumb:hover,
+.katex-display::-webkit-scrollbar-thumb:hover {
+  background-color: var(--foreground-muted);
+}
+
+/* A \boxed{} or otherwise wide formula is wider than a chat bubble more often than
+   not. Without an explicit horizontal scroll region, a bordered element like \boxed
+   wraps mid-formula and its border renders as if it slices through the content -
+   scrolling instead of wrapping keeps the formula (and its box) intact. */
+.katex-display {
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding-block: 0.25rem;
+}
