@@ -29,6 +29,147 @@ This project adds **citation evidence** to retrieval to resolve exactly that:
 Every figure shown to the user is measured, and anything that could not be computed is
 reported as such rather than as zero.
 
+## Architecture
+
+### How a question becomes an answer
+
+A cheap model decides which tools to call; a stronger one writes the answer from the
+passages those tools actually returned. Splitting them keeps the model doing the writing
+from being distracted by tool-call bookkeeping, and holds the expensive tier to one call
+per question.
+
+```mermaid
+flowchart TB
+    Q(["Question"])
+    ORCH{{"Orchestrator &nbsp;·&nbsp; cheap tier &nbsp;·&nbsp; up to 5 iterations"}}
+    TOOLS["Seven tools &nbsp;·&nbsp; search, author lookup, local index,<br/>citation neighbours, per-paper passages, impact metrics"]
+    PASS["Retrieved passages"]
+    GATE{"Produced by an exact lookup?"}
+    GRADE{"Graded relevant?"}
+    RETRY["Retry with BM25 fusion &nbsp;·&nbsp; retry results placed first"]
+    ORDER["Identity matches first &nbsp;·&nbsp; 11,000 character budget"]
+    SYN["Synthesis &nbsp;·&nbsp; strong tier &nbsp;·&nbsp; no tools"]
+    ANS(["Answer with inline citations and measured impact"])
+
+    Q --> ORCH
+    ORCH --> TOOLS
+    TOOLS -. "results feed the next iteration" .-> ORCH
+    TOOLS --> PASS
+    PASS --> GATE
+    GATE -- "yes, nothing to correct" --> ORDER
+    GATE -- "no" --> GRADE
+    GRADE -- "yes" --> ORDER
+    GRADE -- "no" --> RETRY
+    RETRY --> ORDER
+    ORDER --> SYN
+    SYN --> ANS
+
+    classDef io fill:#d4e4f7,stroke:#3f6fa8,stroke-width:1.5px,color:#1f2328
+    classDef tool fill:#d6ebd8,stroke:#4a8a52,stroke-width:1.2px,color:#1f2328
+    classDef brain fill:#f6dcdc,stroke:#b35f5f,stroke-width:1.5px,color:#1f2328
+    classDef gate fill:#fde9c9,stroke:#c98a1a,stroke-width:1.2px,color:#1f2328
+    classDef plain fill:#eef1f5,stroke:#8795a8,stroke-width:1.2px,color:#1f2328
+
+    class Q,ANS io
+    class TOOLS tool
+    class ORCH,SYN brain
+    class GATE,GRADE gate
+    class PASS,RETRY,ORDER plain
+```
+
+| Tool | What it is for |
+| --- | --- |
+| `search_papers` | Discover papers on arXiv and Semantic Scholar, with a title-match tier so a paper *about* a title is never presented as the paper itself |
+| `search_by_author` | Everything by one researcher, newest first, optionally within a year range |
+| `query_index` | Semantic search over the local corpus, ordered by the learned ranker |
+| `find_related_papers` | Neighbours by citation structure rather than wording: co-citation, and bibliographic coupling for papers too new to have been cited |
+| `get_paper_passages` | The relevant passages from each of several papers separately, so one long paper cannot supply the whole comparison |
+| `get_paper_metrics` | Citation impact, field-normalised multiple, network centrality percentile |
+| `ingest_full_text` | Fetch and index a paper's full text on demand |
+
+The gate matters more than it looks. Corrective RAG exists to catch retrieval that
+*missed*, but a lookup by author name or paper id cannot have missed in that sense, so
+grading it only creates chances to discard a correct answer. Asked what a given
+researcher had published, the grader once rejected their own papers because an abstract
+does not list its own authors, and the retry replaced them with similar-sounding work by
+other people.
+
+### Retrieval and ranking
+
+The part the project exists to test. Text similarity cannot distinguish a paper from a
+paper about it, so citation evidence enters as ranking features rather than as a filter.
+
+```mermaid
+flowchart TB
+    Q(["Query"])
+    DENSE["Dense retrieval &nbsp;·&nbsp; bge-small-en-v1.5<br/>matches meaning"]
+    BM25["BM25 &nbsp;·&nbsp; no stemming, no stopword removal<br/>matches exact wording"]
+    CE["Cross-encoder rerank &nbsp;·&nbsp; ms-marco-MiniLM<br/>scores query and chunk together"]
+    FEAT["15 features in 5 groups<br/>text relevance &nbsp;·&nbsp; citation evidence &nbsp;·&nbsp; graph centrality<br/>paper properties &nbsp;·&nbsp; query shape"]
+    LM["LambdaMART &nbsp;·&nbsp; LightGBM lambdarank<br/>optimises list order, not per-item accuracy"]
+    OUT(["Ranked papers"])
+
+    Q --> DENSE
+    Q --> BM25
+    DENSE --> CE
+    CE --> FEAT
+    BM25 --> FEAT
+    FEAT --> LM
+    LM --> OUT
+
+    classDef io fill:#d4e4f7,stroke:#3f6fa8,stroke-width:1.5px,color:#1f2328
+    classDef ret fill:#d6ebd8,stroke:#4a8a52,stroke-width:1.2px,color:#1f2328
+    classDef feat fill:#e2dcf0,stroke:#7a68a6,stroke-width:1.2px,color:#1f2328
+    classDef model fill:#f6dcdc,stroke:#b35f5f,stroke-width:1.5px,color:#1f2328
+
+    class Q,OUT io
+    class DENSE,BM25,CE ret
+    class FEAT feat
+    class LM model
+```
+
+A learned ranker rather than a tuned weight, because the measurements ruled the weight
+out. Every fixed citation weight that helped queries seeking foundational papers hurt
+queries seeking specific niche work, monotonically in both directions, so no single point
+on that trade-off is acceptable. A gradient-boosted tree can express what a weight
+cannot: trust the text score when a query names a paper precisely, reach for centrality
+when it describes one instead.
+
+### Where the citation evidence comes from
+
+```mermaid
+flowchart TB
+    AX(["arXiv API"])
+    S2(["Semantic Scholar API"])
+    CRAWL["Crawl by category and year<br/>cohorts dense enough to support a median"]
+    METRICS["Citation counts, venues, influential citations<br/>batch endpoint, 18 requests not 8,770"]
+    GRAPH["Induced citation subgraph<br/>edge kept only when both endpoints are corpus papers"]
+    DERIVE["CNCI against cohort medians &nbsp;·&nbsp; PageRank &nbsp;·&nbsp; in-degree"]
+    SQL[("SQLite<br/>papers, chunks, metrics, citations, cohorts")]
+    VEC[("Chroma<br/>live collection plus frozen eval snapshot")]
+
+    AX --> CRAWL
+    S2 --> METRICS
+    CRAWL --> METRICS
+    METRICS --> GRAPH
+    GRAPH --> DERIVE
+    DERIVE --> SQL
+    CRAWL --> VEC
+
+    classDef src fill:#fde9c9,stroke:#c98a1a,stroke-width:1.5px,color:#1f2328
+    classDef step fill:#e2dcf0,stroke:#7a68a6,stroke-width:1.2px,color:#1f2328
+    classDef db fill:#dde5ef,stroke:#5a7799,stroke-width:1.5px,color:#1f2328
+
+    class AX,S2 src
+    class CRAWL,METRICS,GRAPH,DERIVE step
+    class SQL,VEC db
+```
+
+Normalisation is not optional here. The median 2017 paper in this corpus has 30
+citations; the median 2025 paper has 1. Ranking on raw counts ranks by age, which is why
+every impact figure shown is divided by its own cohort's median, and why a cohort too
+small to trust a median reports nothing at all rather than a zero.
+
 ## Setup
 
 ### Backend
