@@ -1,0 +1,20 @@
+# Python
+backend/.venv/
+__pycache__/
+*.pyc
+
+# Secrets
+backend/.env
+
+# Generated data: corpus database, vector store, caches, logs, trained model.
+# Everything here is rebuilt by scripts/build_corpus.py and scripts/train_ranker.py.
+# The evaluation query sets are hand-written inputs, not outputs, so they are kept.
+backend/data/*
+!backend/data/eval_set.json
+!backend/data/regression_queries.json
+
+# Node
+frontend/node_modules/
+frontend/.next/
+frontend/tsconfig.tsbuildinfo
+
