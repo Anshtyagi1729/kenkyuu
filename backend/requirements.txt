@@ -1,0 +1,11 @@
+fastapi
+uvicorn[standard]
+python-dotenv
+requests
+feedparser
+pymupdf
+sentence-transformers
+chromadb
+pydantic
+openai
+diskcache
