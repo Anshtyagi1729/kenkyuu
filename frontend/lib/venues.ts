@@ -82,7 +82,8 @@ export function abbreviateVenue(venue: string | null): VenueLabel | null {
   if (!venue) return null;
   const trimmed = venue.trim();
   const lower = trimmed.toLowerCase();
-  if (NON_VENUES.has(lower)) return null;
+  // OpenAlex names arXiv "arXiv (Cornell University)"; same non-venue, other spelling.
+  if (NON_VENUES.has(lower) || lower.startsWith("arxiv")) return null;
 
   for (const [needle, short] of RULES) {
     if (lower.includes(needle)) return { short, full: trimmed, abbreviated: true };
