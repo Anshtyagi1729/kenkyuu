@@ -463,3 +463,106 @@ def list_paper_folder_ids(paper_id: str) -> list[int]:
             "SELECT folder_id FROM saved_papers WHERE paper_id = ?", (paper_id,)
         ).fetchall()
         return [row["folder_id"] for row in rows]
+
+
+# --- Non-destructive merging for externally discovered papers ----------------
+#
+# upsert_paper and upsert_paper_metrics REPLACE every field on conflict, which is right
+# for the crawl (it is the authority on the corpus it built) and wrong for live search
+# results. A search source returns whatever it happens to hold: Semantic Scholar may
+# have no abstract, OpenAlex gives a year where arXiv gave a submission date, neither
+# knows our cohort category. Routed through the replacing upserts, a live search that
+# returned an existing corpus paper would erase its abstract, rewrite its date to
+# January 1st, and null the venue, influential-citation count and category the ranker
+# reads as features. Measured 2026-11-20: no row had been damaged yet, only because S2
+# search had been rate-limited the whole time. The functions below fill gaps and never
+# overwrite.
+
+
+def find_paper_by_doi(doi: str) -> str | None:
+    """paper_id of a corpus paper carrying this DOI, if any.
+
+    How a paper found through two sources lands on one row. OpenAlex and Crossref key on
+    DOIs, the corpus keys on arXiv ids or S2 hashes, and without this lookup the same
+    Springer paper found once via Semantic Scholar and once via OpenAlex would be stored,
+    indexed and cited as two papers.
+    """
+    if not doi:
+        return None
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT paper_id FROM papers WHERE LOWER(json_extract(external_ids, '$.DOI')) = ? LIMIT 1",
+            (doi.lower(),),
+        ).fetchone()
+        return row["paper_id"] if row else None
+
+
+def merge_external_paper(
+    paper_id: str,
+    source: str,
+    title: str,
+    abstract: str | None,
+    authors: list[str],
+    published: str | None,
+    external_ids: dict,
+) -> None:
+    """Inserts a paper, or fills only the fields an existing row is missing."""
+    if not paper_id:
+        raise ValueError(f"paper_id is required (got {paper_id!r}, title={title!r})")
+
+    existing = get_paper(paper_id)
+    if existing is None:
+        upsert_paper(paper_id, source, title, abstract, authors, published, external_ids=external_ids)
+        return
+
+    merged_ids = {**external_ids, **json.loads(existing["external_ids"] or "{}")}  # existing wins
+    with connect() as conn:
+        conn.execute(
+            """
+            UPDATE papers SET
+                abstract = COALESCE(abstract, ?),
+                authors = CASE WHEN authors IS NULL OR authors = '[]' THEN ? ELSE authors END,
+                published = COALESCE(published, ?),
+                external_ids = ?
+            WHERE paper_id = ?
+            """,
+            (abstract, json.dumps(authors), published, json.dumps(merged_ids), existing["paper_id"]),
+        )
+
+
+def insert_metrics_if_absent(
+    paper_id: str,
+    s2_paper_id: str | None,
+    citation_count: int | None,
+    venue: str | None,
+    cohort_year: int | None,
+) -> bool:
+    """Writes metrics for a paper the crawl never measured. Returns whether it wrote.
+
+    A paper that already has a metrics row keeps it untouched: its counts came from one
+    consistent Semantic Scholar snapshot, and CNCI divides by cohort medians computed
+    from that same snapshot. Mixing in a count from another source at another date would
+    put numerator and denominator on different scales.
+    """
+    with connect() as conn:
+        cur = conn.execute(
+            """
+            INSERT OR IGNORE INTO paper_metrics (
+                paper_id, s2_paper_id, citation_count, influential_citation_count,
+                reference_count, venue, cohort_year, primary_category, fetched_at
+            )
+            VALUES (?, ?, ?, NULL, NULL, ?, ?, NULL, datetime('now'))
+            """,
+            (paper_id, s2_paper_id, citation_count, venue, cohort_year),
+        )
+        if cur.rowcount > 0:
+            return True
+        # An existing row may still have gaps a second source can fill. The venue is
+        # one: a paper first recorded from Semantic Scholar carries none, and OpenAlex
+        # knows it. Counts and years are left alone (see above); only NULLs are filled.
+        if venue:
+            conn.execute(
+                "UPDATE paper_metrics SET venue = ? WHERE paper_id = ? AND venue IS NULL",
+                (venue, paper_id),
+            )
+        return False
