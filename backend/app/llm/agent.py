@@ -2,7 +2,8 @@
 
 Two-stage design:
   1. Orchestration loop (cheap model tier) - decides which tools to call
-     (search arXiv/S2, query the vector index, pull in a paper's full text)
+     (federated search over arXiv, OpenAlex, Crossref and Semantic Scholar, query the
+     vector index, pull in a paper's full text)
      across up to MAX_TOOL_ITERATIONS steps. This is most of an agentic
      loop's calls, and doesn't need a strong model to pick a tool.
   2. Synthesis (strong model tier, single call, no tools) - given only the
@@ -14,10 +15,20 @@ Two-stage design:
 import json
 import logging
 import re
-from app.ingestion import pipeline, retrieval, semantic_scholar_client
+from concurrent.futures import ThreadPoolExecutor, wait
+from dataclasses import dataclass, field
+from app.ingestion import (
+    arxiv_client,
+    crossref_client,
+    openalex_client,
+    pipeline,
+    retrieval,
+    semantic_scholar_client,
+)
 from app.storage import db
 from app.llm import grading, router
-from app.ranking import rerank
+from app.ranking import identity, rerank
+from app.config import S2_API_KEY
 from app.scientometrics import related, scorecard
 
 logger = logging.getLogger(__name__)
@@ -104,11 +115,11 @@ If a user names a paper and nothing comes back above partial, say plainly that y
 could not find that exact paper, show the closest candidates, and ask them to confirm \
 the title or give an author. Do not quietly substitute a different paper.
 
-If the result carries `sources_unavailable`, a backend did not answer - say so. Never \
-tell a user their paper does not exist when Semantic Scholar was unreachable: it is the \
-only source covering IEEE, Springer, Elsevier and ACM, so a journal paper could not \
-have been found at all. Suggest retrying, or ask for an author name so \
-search_by_author can try arXiv directly.
+If the result carries `coverage_warning`, no source covering journals and conferences \
+answered, so a journal paper could not have been found at all: say so, and never tell \
+the user their paper does not exist. An individual entry in `sources_unavailable` is \
+normal (Semantic Scholar is skipped without an API key) and needs no comment unless \
+nothing useful came back.
 
 Whenever you recommend, rank, or compare papers, call get_paper_metrics on them and \
 quote real numbers. "Highly influential" is an opinion the professor cannot check; \
@@ -158,7 +169,7 @@ TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "search_papers",
-            "description": "Search for papers by topic (queries arXiv and Semantic Scholar; if one source fails or is rate-limited, results from the other are still returned). Records metadata + abstract for each result (no full-text download).",
+            "description": "Search for papers by title or topic across arXiv, OpenAlex (journals, conferences and preprints) and Crossref, in parallel; Semantic Scholar too when configured. Any source that is down is skipped and reported, and the rest still answer. Each result is labelled with how exactly its title matches the query. Records metadata and abstract for each result (no full-text download).",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -320,7 +331,7 @@ def _activity_label(name: str, args: dict) -> str:
     """
     if name == "search_papers":
         sort = " (newest first)" if args.get("sort") == "recency" else ""
-        return f"Searching arXiv and Semantic Scholar for \u201c{args.get('query', '')}\u201d{sort}"
+        return f"Searching arXiv, OpenAlex and Crossref for \u201c{args.get('query', '')}\u201d{sort}"
     if name == "search_by_author":
         years = ""
         if args.get("year_from") or args.get("year_to"):
@@ -362,47 +373,11 @@ def _execute_tool(name: str, args: dict, collected_chunks: list[dict]) -> dict |
 TITLE_MATCH_STRONG = 0.75   # almost certainly the paper being asked for
 TITLE_MATCH_PARTIAL = 0.45  # plausibly it; the agent must not assert that it is
 
-# Containment alone cannot separate a paper from a paper ABOUT it. The query
-# "attention is all you need" is fully contained in both "Attention Is All You Need"
-# and "On the Naming of Attention Is All You Need: A Study" - which is this project's
-# signature failure mode, the one that made the cross-encoder rank a commentary above
-# the paper it comments on.
-#
-# The discriminator is how much title is left over once the query is accounted for. A
-# title that IS the query carries no surplus; a title that quotes the query inside a
-# larger claim carries several words of it. The threshold is a ratio rather than a
-# count so it holds for short and long titles alike - and the "exact" tier is withheld
-# rather than guessed at when a query is only a fragment ("bert"), where a long title
-# is entirely legitimate and identity has to be established some other way.
-TITLE_EXACT_OVERLAP = 0.9
-TITLE_EXACT_LENGTH_RATIO = 1.3
 
-# Words that carry no identifying information in a title lookup. Kept deliberately
-# short: this is NOT general stopword removal (see lexical.tokenize for why that would
-# be wrong here), only the framing words people wrap around a title when asking.
-_TITLE_NOISE = frozenset({
-    "a", "an", "the", "of", "for", "in", "on", "and", "or", "to", "with", "via",
-    "using", "based", "paper", "papers", "original", "find", "show", "me", "get",
-    "about", "this", "that", "is", "are", "by", "from", "at", "as", "its",
-})
-
-
-def _title_tokens(text: str) -> set[str]:
-    return {w for w in re.findall(r"[a-z0-9]+", (text or "").lower()) if w not in _TITLE_NOISE}
-
-
-def _title_similarity(query: str, title: str) -> float:
-    """Fraction of the query's content words that appear in the title.
-
-    Asymmetric on purpose. A long title containing every word of a short query IS the
-    paper asked for, and dividing by the union (Jaccard) would punish it for having a
-    subtitle. What matters is whether the query is accounted for, not whether the two
-    strings are the same length.
-    """
-    q = _title_tokens(query)
-    if not q:
-        return 0.0
-    return len(q & _title_tokens(title)) / len(q)
+# Title tokenisation and similarity live in ranking/identity.py, shared with the
+# retrieval path; aliased here so the call sites below keep reading naturally.
+_title_tokens = identity.title_tokens
+_title_similarity = identity.title_similarity
 
 
 _QUESTION_OPENERS = (
@@ -437,10 +412,11 @@ def _match_label(score: float, query: str = "", title: str = "") -> str:
     title contains what you asked for, plus a lot more" are different claims and the
     agent must not state the second as the first.
     """
-    if score >= TITLE_EXACT_OVERLAP and query and title:
-        q_len = len(_title_tokens(query)) or 1
-        if len(_title_tokens(title)) / q_len <= TITLE_EXACT_LENGTH_RATIO:
-            return "exact_title_match"
+    # Exact means the query IS the title, word for word in order (identity.is_known_item).
+    # An earlier length-ratio heuristic let "Not All Attention Is All You Need" and "Is
+    # Attention All You Need?" through as exact matches for the transformer paper.
+    if query and title and identity.is_known_item(query, title):
+        return "exact_title_match"
     if score >= TITLE_MATCH_STRONG:
         return "strong_title_match"
     if score >= TITLE_MATCH_PARTIAL:
@@ -448,174 +424,354 @@ def _match_label(score: float, query: str = "", title: str = "") -> str:
     return "topic_match_only"
 
 
-def _search_papers(query: str, max_results: int, sort: str, collected_chunks: list[dict]) -> dict:
-    """Searches arXiv and Semantic Scholar, labelling how well each result matches.
+# How long a search waits for slow sources before answering with what has arrived.
+# Long enough for a healthy source (all answer in 1-3s when up), short enough that one
+# throttled API cannot hold the whole answer hostage.
+SEARCH_DEADLINE_SECONDS = 15.0
 
-    Each source's failure is independent - arXiv having a bad moment shouldn't lose
-    Semantic Scholar's results and vice versa. This used to be two separate tools and
-    the orchestrator (cheap model) was unreliable about switching to the other one when
-    one failed, so merging them here makes source fallback deterministic rather than
-    dependent on the model noticing and reacting correctly.
 
-    Two things are reported that the earlier version silently dropped:
+@dataclass
+class _Candidate:
+    """One paper as reported by one or more sources, merged before recording."""
 
-    `sources_unavailable` - which backends did not answer. This matters because the two
-    cover different literature: arXiv is preprints only, and Semantic Scholar is the
-    ONLY route to IEEE, Springer, Elsevier and ACM papers. If S2 is rate-limited and
-    arXiv returns five topically-similar preprints, the old result was five papers with
-    no indication that the half of the literature containing the actual answer was never
-    searched - so a professor looking for their own journal paper would be shown five
-    other people's preprints with no caveat.
+    title: str
+    abstract: str | None = None
+    authors: list[str] = field(default_factory=list)
+    year: int | None = None
+    venue: str | None = None
+    citation_count: int | None = None
+    doi: str | None = None
+    arxiv_id: str | None = None
+    sources: list[str] = field(default_factory=list)
+    arxiv_paper: object | None = None      # the ArxivPaper, when arXiv returned it
+    openalex_work: object | None = None    # the OpenAlexWork, when OpenAlex returned it
+    s2_paper: object | None = None
+    rank: int = 0                          # best position any source gave it
 
-    `match` - how much of the query's wording the title accounts for. Without it the
-    agent cannot distinguish "this IS the paper you named" from "this is a paper about
-    the same thing", and it confidently presents the second as the first.
+    def keys(self) -> set:
+        # Title words IN ORDER. A word-set key merged "Is Attention All You Need?" into
+        # "Attention Is All You Need", and thread timing decided which title survived.
+        keys = {("title", identity.title_sequence(self.title))}
+        if self.arxiv_id:
+            keys.add(("arxiv", db.canonical_paper_id(self.arxiv_id)))
+        if self.doi:
+            keys.add(("doi", self.doi.lower()))
+        return keys
 
-    `sort` only applies to arXiv; S2's search API exposes no recency sort.
+    def absorb(self, other: "_Candidate") -> None:
+        """Fills this candidate's gaps from another report of the same paper."""
+        for attr in ("abstract", "year", "venue", "doi", "arxiv_id", "arxiv_paper", "openalex_work", "s2_paper"):
+            if getattr(self, attr) is None and getattr(other, attr) is not None:
+                setattr(self, attr, getattr(other, attr))
+        if not self.authors:
+            self.authors = other.authors
+        if other.citation_count is not None:
+            self.citation_count = max(self.citation_count or 0, other.citation_count)
+        self.sources += [s for s in other.sources if s not in self.sources]
+        self.rank = min(self.rank, other.rank)
+
+
+def _from_arxiv(papers) -> list[_Candidate]:
+    return [
+        _Candidate(title=p.title, abstract=p.abstract, authors=p.authors,
+                   year=int(p.published[:4]) if p.published else None,
+                   arxiv_id=p.arxiv_id, sources=["arxiv"], arxiv_paper=p, rank=i)
+        for i, p in enumerate(papers)
+    ]
+
+
+def _from_openalex(works, source: str = "openalex") -> list[_Candidate]:
+    return [
+        _Candidate(title=w.title, abstract=w.abstract, authors=w.authors, year=w.year,
+                   venue=w.venue, citation_count=w.citation_count, doi=w.doi,
+                   arxiv_id=w.arxiv_id, sources=[source], openalex_work=w, rank=i)
+        for i, w in enumerate(works)
+    ]
+
+
+def _from_s2(papers) -> list[_Candidate]:
+    out = []
+    for i, p in enumerate(papers):
+        ids = p.external_ids or {}
+        out.append(_Candidate(title=p.title, abstract=p.abstract, authors=p.authors, year=p.year,
+                              citation_count=p.citation_count, doi=ids.get("DOI"),
+                              arxiv_id=ids.get("ArXiv"), sources=["semantic_scholar"], s2_paper=p, rank=i))
+    return out
+
+
+def _resolve_title_via_crossref(query: str) -> list[_Candidate]:
+    """Crossref identifies the paper a misremembered title means; OpenAlex fills it in.
+
+    Crossref's bibliographic matcher tolerates a wrong word that full-text search does
+    not - it found the panel's paper from "error weighted drift ADOPTING ensemble
+    framework" when OpenAlex's search did not have it in its top ten - but it rarely
+    holds abstracts. So its DOI is used to fetch the full OpenAlex record.
     """
-    results: list[dict] = []
-    unavailable: list[dict] = []
-    searched: list[str] = []
+    out = []
+    for i, work in enumerate(crossref_client.match_bibliographic(query, rows=5)):
+        if identity.title_similarity(query, work.title) < TITLE_MATCH_PARTIAL:
+            continue
+        enriched = openalex_client.get_by_doi(work.doi)
+        if enriched is not None:
+            out.extend(_from_openalex([enriched], source="crossref"))
+        else:
+            out.append(_Candidate(title=work.title, authors=work.authors, year=work.year,
+                                  venue=work.venue, citation_count=work.citation_count,
+                                  doi=work.doi, sources=["crossref"]))
+        out[-1].rank = i
+        if len(out) >= 2:
+            break
+    return out
 
-    # Exact-title lookup first, when the query is reciting a title. This is the only
-    # route in the system to a paper with no arXiv preprint - an IEEE, Springer,
-    # Elsevier or ACM paper - which is precisely the case of a professor searching for
-    # their own published work. A hit here is the strongest identity evidence
-    # available, stronger than any relevance ranking, so it leads the results.
-    if _looks_like_a_title(query):
-        try:
-            matched = semantic_scholar_client.match_title(query)
-            if matched is not None:
-                searched.append("semantic_scholar_title_match")
-                ids = matched.external_ids or {}
-                entry = {
-                    "paper_id": ids.get("ArXiv") or matched.paper_id,
-                    "title": matched.title,
-                    "source": "semantic_scholar_title_match",
-                    "year": matched.year,
-                    "citation_count": matched.citation_count,
-                    "match": _match_label(_title_similarity(query, matched.title), query, matched.title),
-                }
-                if matched.authors:
-                    entry["authors"] = ", ".join(matched.authors[:6])
-                if ids.get("ArXiv"):
-                    entry["arxiv_id"] = ids["ArXiv"]
-                if ids.get("DOI"):
-                    entry["doi"] = ids["DOI"]
-                # Recorded into the corpus, not just used for this turn. A Springer or
-                # IEEE paper found this way is otherwise unreachable on any later
-                # question, because nothing else in the system can ingest a paper with
-                # no arXiv preprint.
-                try:
-                    pipeline.record_s2_paper(matched)
-                except Exception as exc:  # noqa: BLE001 - recording is best-effort
-                    logger.info("could not record S2 paper: %s", str(exc)[:120])
 
-                if matched.abstract:
-                    entry["abstract"] = matched.abstract[:300]
-                    # Citable immediately: an exact title match IS the paper asked for,
-                    # and routing it through a later semantic re-query is how the agent
-                    # previously lost papers it had already correctly identified.
-                    collected_chunks.extend(_mark_identified([{
-                        "paper_id": entry["paper_id"],
-                        "chunk_id": f"{entry['paper_id']}::abstract",
-                        "text": f"{matched.title}\n\n{matched.abstract}",
-                    }]))
-                results.append(entry)
-        except Exception as exc:  # noqa: BLE001 - one source of several
-            logger.info("S2 title match unavailable: %s", str(exc)[:120])
-            unavailable.append({"source": "semantic_scholar_title_match", "reason": str(exc)[:200]})
+def _merge(candidates: list[_Candidate]) -> list[_Candidate]:
+    """Collapses reports of the same paper from different sources into one.
 
-    try:
-        papers = pipeline.search_and_record(query, max_results=max_results, sort=sort)
-        searched.append("arxiv")
-        for paper in papers:
-            score = _title_similarity(query, paper.title)
-            results.append({
-                "paper_id": paper.arxiv_id,
-                "title": paper.title,
-                "source": "arxiv",
-                "published": (paper.published or "")[:10],
-                "match": _match_label(score, query, paper.title),
-                "abstract": (paper.abstract or "")[:300],
-            })
-        # A title match is a strong enough identity signal ("this IS the paper being
-        # asked for") that its abstract should be guaranteed citable regardless of
-        # query_index's separate semantic reranking - which, for a query like "show me
-        # the original transformer paper", can genuinely score a different paper's
-        # abstract higher just for echoing similar phrasing about the target, without
-        # that other paper actually being the one asked for.
-        collected_chunks.extend(
-            _mark_identified(_abstract_chunks([
-                p.arxiv_id
-                for p in papers
-                if p.abstract
-                and (p.is_title_match or _title_similarity(query, p.title) >= TITLE_MATCH_STRONG)
-            ]))
+    Matched on arXiv id, DOI, or identical title words - any one is enough. Without
+    this the agent sees the transformer paper three times (arXiv, OpenAlex, S2) and
+    spends three of its result slots, and its reader's attention, on one paper.
+    """
+    merged: list[_Candidate] = []
+    for cand in candidates:
+        home = next((m for m in merged if m.keys() & cand.keys()), None)
+        if home is None:
+            merged.append(cand)
+        else:
+            home.absorb(cand)
+    return merged
+
+
+def _record(cand: _Candidate) -> str | None:
+    """Writes a merged candidate into the corpus and returns its id.
+
+    arXiv's own record goes in first when there is one, since it is the authority on a
+    preprint's text and date; the other sources then fill gaps (venue, DOI, citations)
+    without overwriting it.
+    """
+    pid = None
+    if cand.arxiv_paper is not None:
+        pipeline.record_search_result(cand.arxiv_paper)
+        pid = db.get_paper(cand.arxiv_paper.arxiv_id)["paper_id"]
+    if cand.openalex_work is not None:
+        pid = pipeline.record_openalex_work(cand.openalex_work) or pid
+    if cand.s2_paper is not None:
+        pid = pipeline.record_s2_paper(cand.s2_paper) or pid
+    if pid is None:  # Crossref-only: no abstract and no OpenAlex record
+        pid = pipeline.record_external(
+            source="crossref", title=cand.title, abstract=None, authors=cand.authors,
+            year=cand.year, doi=cand.doi, fallback_id=None, citation_count=cand.citation_count,
+            venue=cand.venue,
         )
-    except Exception as exc:  # noqa: BLE001 - independent per-source fallback
-        logger.warning("arXiv search failed: %s", exc)
-        unavailable.append({"source": "arxiv", "reason": str(exc)[:200]})
+    return pid
 
-    try:
-        papers = semantic_scholar_client.search(query, limit=max_results)
-        searched.append("semantic_scholar")
-        for paper in papers:
-            score = _title_similarity(query, paper.title)
-            entry = {
-                "paper_id": paper.paper_id,
-                "title": paper.title,
-                "source": "semantic_scholar",
-                "year": paper.year,
-                "citation_count": paper.citation_count,
-                "match": _match_label(score, query, paper.title),
-            }
-            if paper.authors:
-                entry["authors"] = ", ".join(paper.authors[:4])
-            # Where to actually read it. An S2 result may be a journal or conference
-            # paper with no preprint, and the arXiv id or DOI is the only way the
-            # professor can follow it up.
-            ids = paper.external_ids or {}
-            if ids.get("ArXiv"):
-                entry["arxiv_id"] = ids["ArXiv"]
-            elif ids.get("DOI"):
-                entry["doi"] = ids["DOI"]
-            # Same reasoning as the title match: record it so a follow-up question can
-            # retrieve it. Only papers carrying an abstract are worth indexing - without
-            # one there is nothing to embed and nothing to quote.
-            if paper.abstract:
-                try:
-                    pipeline.record_s2_paper(paper)
-                except Exception as exc:  # noqa: BLE001 - best-effort
-                    logger.info("could not record S2 paper: %s", str(exc)[:120])
-            results.append(entry)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("Semantic Scholar search failed: %s", exc)
-        unavailable.append({"source": "semantic_scholar", "reason": str(exc)[:200]})
 
-    # Reported from the best individual candidate rather than recomputed from a bare
-    # score, so the headline label and the per-result labels can never disagree.
-    ranked = sorted(results, key=lambda r: _title_similarity(query, r["title"]), reverse=True)
+def _search_papers(query: str, max_results: int, sort: str, collected_chunks: list[dict]) -> dict:
+    """Federated search: every available source in parallel, merged, labelled, recorded.
+
+    Previously this asked arXiv and then Semantic Scholar, one after the other. Both now
+    fail routinely - arXiv throttles to one request per three seconds and has refused
+    this machine outright for days, Semantic Scholar answers 429 to every search without
+    a key - and when both did, the agent quietly answered from its local corpus. Now:
+
+      arXiv       preprints, authoritative text
+      OpenAlex    journals, conferences and preprints; abstracts, citations, venues
+      Crossref    resolves a misremembered title to a DOI (title-shaped queries only)
+      Semantic    used when S2_API_KEY is set; skipped, and said so, when it is not
+      Scholar
+
+    All run concurrently against one deadline, so the slowest source sets the latency
+    only while it is healthy. Any that fails or times out is reported in
+    `sources_unavailable`, and the answer is built from the rest.
+
+    Fetching happens in worker threads; recording (database, embedding model, vector
+    store) happens afterwards on this thread, so none of those are written concurrently.
+
+    Each result carries a `match` label saying whether its title IS what was asked for
+    (exact / strong) or merely shares its subject (partial / topic), so a paper about a
+    title is never presented as the paper itself.
+    """
+    jobs = {
+        "arxiv": lambda: _from_arxiv(arxiv_client.search(query, max_results=max_results, sort=sort, categories=None)),
+        "openalex": lambda: _from_openalex(openalex_client.search(query, limit=max_results, sort=sort)),
+    }
+    if _looks_like_a_title(query):
+        jobs["crossref"] = lambda: _resolve_title_via_crossref(query)
+    if S2_API_KEY:
+        jobs["semantic_scholar"] = lambda: _from_s2(semantic_scholar_client.search(query, limit=max_results))
+
+    found: list[_Candidate] = []
+    searched: list[str] = []
+    unavailable: list[dict] = []
+    if not S2_API_KEY:
+        unavailable.append({"source": "semantic_scholar", "reason": "skipped: no S2_API_KEY configured"})
+
+    pool = ThreadPoolExecutor(max_workers=len(jobs))
+    futures = {pool.submit(fn): name for name, fn in jobs.items()}
+    done, pending = wait(futures, timeout=SEARCH_DEADLINE_SECONDS)
+    for fut in done:
+        name = futures[fut]
+        try:
+            found.extend(fut.result())
+            searched.append(name)
+        except Exception as exc:  # noqa: BLE001 - one failed source must not lose the others
+            logger.warning("%s search failed: %s", name, str(exc)[:160])
+            unavailable.append({"source": name, "reason": str(exc)[:160]})
+    for fut in pending:
+        unavailable.append({"source": futures[fut], "reason": f"no answer within {SEARCH_DEADLINE_SECONDS:.0f}s"})
+    # Do not wait for stragglers: they finish in the background and are discarded.
+    pool.shutdown(wait=False, cancel_futures=True)
+
+    merged = _merge(found)
+    for cand in merged:
+        cand.match = _match_label(_title_similarity(query, cand.title), query, cand.title)
+    tier = {"exact_title_match": 0, "strong_title_match": 1, "partial_title_match": 2, "topic_match_only": 3}
+    # Identity first, then papers several sources agree on, then each source's own order.
+    merged.sort(key=lambda c: (tier[c.match], -len(c.sources), c.rank))
+    merged = merged[: max_results * 2]
+
+    results = []
+    identified_ids = []
+    for cand in merged:
+        try:
+            pid = _record(cand)
+        except Exception as exc:  # noqa: BLE001 - one bad record must not lose the rest
+            logger.info("could not record %r: %s", cand.title[:60], str(exc)[:120])
+            pid = None
+        entry = {
+            "paper_id": pid or cand.doi or cand.title[:40],
+            "title": cand.title,
+            "match": cand.match,
+            "sources": cand.sources,
+            "year": cand.year,
+        }
+        for key, value in (("venue", cand.venue), ("citation_count", cand.citation_count),
+                           ("doi", cand.doi), ("arxiv_id", cand.arxiv_id)):
+            if value:
+                entry[key] = value
+        if cand.authors:
+            entry["authors"] = ", ".join(cand.authors[:4]) + (" et al." if len(cand.authors) > 4 else "")
+        if cand.abstract:
+            entry["abstract"] = cand.abstract[:300]
+        results.append(entry)
+        if pid and cand.match in ("exact_title_match", "strong_title_match"):
+            identified_ids.append(pid)
+
+    # A paper whose title IS the query is guaranteed citable here, rather than left to a
+    # later semantic re-query that can rank a paper ABOUT it higher.
+    collected_chunks.extend(_mark_identified(_abstract_chunks(identified_ids)))
+
     out: dict = {
-        "sources_searched": searched,
+        "sources_searched": sorted(searched),
         "results": results,
-        "best_title_match": (
-            _match_label(_title_similarity(query, ranked[0]["title"]), query, ranked[0]["title"])
-            if ranked else "none"
-        ),
+        "best_title_match": results[0]["match"] if results else "none",
     }
     if unavailable:
         out["sources_unavailable"] = unavailable
+    if not ({"openalex", "crossref", "semantic_scholar"} & set(searched)):
         out["coverage_warning"] = (
-            "Some sources did not answer. Do NOT tell the user a paper does not exist - "
-            + ("Semantic Scholar was unreachable, and it is the only source covering "
-               "IEEE, Springer, Elsevier and ACM papers, so a non-arXiv paper could not "
-               "have been found by this search."
-               if any(u["source"] == "semantic_scholar" for u in unavailable)
-               else "arXiv was unreachable, so preprints could not be searched.")
+            "No source covering journal and conference papers answered (OpenAlex, "
+            "Crossref, Semantic Scholar). Only preprints were searched, so do NOT tell "
+            "the user a paper does not exist - a journal paper could not have been found."
         )
     if not results:
         out["result"] = "No papers matched this query from the sources that answered."
+    return out
+
+
+def _search_by_author(
+    author: str,
+    limit: int,
+    year_from: int | None,
+    year_to: int | None,
+    collected_chunks: list[dict],
+) -> dict:
+    """A researcher's papers from OpenAlex and arXiv together, newest first.
+
+    arXiv alone was the wrong source for this question. Most professors publish chiefly
+    in journals and conferences, and the panel's own author is a clear case: OpenAlex
+    resolves "Seba Susan" to Delhi Technological University with 171 works, almost none
+    of which arXiv author search can see. OpenAlex is therefore primary; arXiv runs in
+    parallel and adds any preprints, and both are merged by arXiv id, DOI and title.
+
+    Which person was matched is reported back, because names collide and the agent must
+    be able to say whose work it found rather than silently picking a namesake.
+
+    The results are made citable directly, with the author list and date written INTO
+    the passage text: the question is about authorship and dates, an abstract never
+    names its own authors, and synthesis may only use what the passages contain.
+    Answered from the list itself - running a semantic search for the question instead
+    returned the transformer and RAG papers for "what has Bengio published recently".
+    """
+    matched = None
+
+    def from_openalex():
+        nonlocal matched
+        matched = openalex_client.find_author(author)
+        if matched is None:
+            return []
+        return _from_openalex(
+            openalex_client.works_by_author(matched.openalex_id, limit=limit, year_from=year_from, year_to=year_to)
+        )
+
+    def from_arxiv():
+        return _from_arxiv(arxiv_client.search_by_author(author, max_results=limit, year_from=year_from, year_to=year_to))
+
+    found, searched, unavailable = [], [], []
+    pool = ThreadPoolExecutor(max_workers=2)
+    futures = {pool.submit(from_openalex): "openalex", pool.submit(from_arxiv): "arxiv"}
+    done, pending = wait(futures, timeout=SEARCH_DEADLINE_SECONDS)
+    for fut in done:
+        try:
+            found.extend(fut.result())
+            searched.append(futures[fut])
+        except Exception as exc:  # noqa: BLE001 - one failed source must not lose the other
+            unavailable.append({"source": futures[fut], "reason": str(exc)[:160]})
+    for fut in pending:
+        unavailable.append({"source": futures[fut], "reason": f"no answer within {SEARCH_DEADLINE_SECONDS:.0f}s"})
+    pool.shutdown(wait=False, cancel_futures=True)
+
+    papers = sorted(_merge(found), key=lambda c: -(c.year or 0))[:limit]
+    if not papers:
+        return {"result": f"No papers found for author {author!r}.", "sources_searched": searched,
+                **({"sources_unavailable": unavailable} if unavailable else {})}
+
+    results = []
+    for cand in papers:
+        try:
+            pid = _record(cand)
+        except Exception as exc:  # noqa: BLE001
+            logger.info("could not record %r: %s", cand.title[:60], str(exc)[:120])
+            continue
+        if not pid:
+            continue
+        venue = f"Venue: {cand.venue}\n" if cand.venue else ""
+        body = cand.abstract or "(No abstract is available for this paper on record.)"
+        collected_chunks.extend(_mark_identified([{
+            "paper_id": pid,
+            "chunk_id": f"{pid}::author_listing",
+            "text": (
+                f"{cand.title}\n"
+                f"Authors: {', '.join(cand.authors) or 'unknown'}\n"
+                f"Year: {cand.year or 'unknown'}\n"
+                f"{venue}\n{body}"
+            ),
+        }]))
+        entry = {"paper_id": pid, "title": cand.title, "year": cand.year, "sources": cand.sources}
+        if cand.venue:
+            entry["venue"] = cand.venue
+        if cand.citation_count is not None:
+            entry["citation_count"] = cand.citation_count
+        results.append(entry)
+
+    out: dict = {"sources_searched": sorted(searched), "results": results}
+    if matched is not None:
+        out["matched_author"] = {
+            "name": matched.name,
+            "institution": matched.institution,
+            "total_works": matched.works_count,
+        }
+    if unavailable:
+        out["sources_unavailable"] = unavailable
     return out
 
 
@@ -656,10 +812,11 @@ def _abstract_chunks(paper_ids) -> list[dict]:
     placeholders = ",".join("?" * len(ids))
     with db.connect() as conn:
         rows = conn.execute(
-            f"SELECT paper_id, COALESCE(canonical_id, paper_id) AS cid, title, abstract "
-            f"FROM papers "
-            f"WHERE paper_id IN ({placeholders}) OR canonical_id IN ({placeholders}) "
-            f"ORDER BY paper_id",
+            f"SELECT p.paper_id, COALESCE(p.canonical_id, p.paper_id) AS cid, p.title, "
+            f"       p.abstract, c.text AS indexed_text "
+            f"FROM papers p LEFT JOIN chunks c ON c.chunk_id = p.paper_id || '::abstract' "
+            f"WHERE p.paper_id IN ({placeholders}) OR p.canonical_id IN ({placeholders}) "
+            f"ORDER BY p.paper_id",
             ids + ids,
         ).fetchall()
 
@@ -671,13 +828,21 @@ def _abstract_chunks(paper_ids) -> list[dict]:
     seen: set[str] = set()
     chunks = []
     for row in rows:
-        if not row["abstract"] or row["cid"] in seen:
+        # The indexed chunk text is preferred over rebuilding it: for a paper with no
+        # abstract it is the title-only record (title, authors, and an explicit "no
+        # abstract on record" note). Skipping abstractless papers here meant the panel's
+        # own paper - correctly identified by title - reached synthesis with nothing
+        # citable attached.
+        text = row["indexed_text"] or (
+            f"{row['title']}\n\n{row['abstract']}" if row["abstract"] else None
+        )
+        if not text or row["cid"] in seen:
             continue
         seen.add(row["cid"])
         chunks.append({
             "paper_id": row["paper_id"],
             "chunk_id": f"{row['paper_id']}::abstract",
-            "text": f"{row['title']}\n\n{row['abstract']}",
+            "text": text,
         })
     return chunks
 
@@ -751,13 +916,26 @@ def _paper_passages(paper_ids: list[str], focus: str | None, collected_chunks: l
         # the orchestrator judged that unhelpful and called the same tool three more
         # times, exhausting its iteration budget.
         pipeline.ingest_full_text(paper["paper_id"])
+        full_text = db.has_full_text(paper["paper_id"])
         chunks = retrieval.search(query, top_k=PASSAGES_PER_PAPER, paper_id=paper["paper_id"])
         collected_chunks.extend(_mark_identified(chunks))
-        out.append({
+        entry = {
             "paper_id": paper_id,
             "title": paper["title"],
+            "full_text_read": full_text,
             "passages": [c["text"][:400] for c in chunks] or ["(no passage matched this focus)"],
-        })
+        }
+        # Said explicitly, because an answer drawn from an abstract reads exactly like one
+        # drawn from the paper, and they support very different claims. Many journal
+        # papers have no openly available PDF; that is a fact about the paper to report,
+        # not a gap to paper over.
+        if not full_text:
+            entry["note"] = (
+                "Only the abstract (or title) was available - no open-access full text "
+                "exists for this paper. Say so, and do not present details as if read "
+                "from the paper body."
+            )
+        out.append(entry)
     return {"focus": query, "papers": out}
 
 
@@ -778,51 +956,13 @@ def _run_tool(name: str, args: dict, collected_chunks: list[dict]) -> dict | lis
         return _paper_metrics(args.get("paper_ids") or [])
 
     if name == "search_by_author":
-        papers = pipeline.search_author_and_record(
+        return _search_by_author(
             args["author"],
-            max_results=args.get("max_results", 8),
+            limit=args.get("max_results", 8),
             year_from=args.get("year_from"),
             year_to=args.get("year_to"),
+            collected_chunks=collected_chunks,
         )
-        if not papers:
-            return {"result": f"No arXiv papers found for author {args['author']!r}."}
-
-        # Author results are made citable HERE rather than waiting for a query_index
-        # follow-up, because for this question there is nothing for that follow-up to
-        # usefully retrieve. "What has Bengio published recently" is answered by the
-        # list itself; a semantic search of the index for that sentence returns
-        # whatever is textually nearest to it, which measured as the transformer and
-        # RAG papers - neither by Bengio. The model then dutifully wrote that it could
-        # find no recent Bengio papers, having just been handed eight.
-        #
-        # Same principle as the scorecard context: where the retrieval is already
-        # exactly right, do not route it through a step that can only degrade it.
-        # The author list and date are written INTO the passage text. Synthesis is
-        # instructed to use only what the passages contain, and an abstract never
-        # names its own authors - so without this the model was handed the correct
-        # eight papers and then correctly refused to say who wrote them, answering
-        # that it could find no recent Bengio publications. The question is about
-        # authorship and dates, so those have to be in the evidence, not merely in
-        # the metadata that selected it.
-        for paper in papers:
-            if not paper.abstract:
-                continue
-            authors = ", ".join(paper.authors) or "unknown"
-            collected_chunks.extend(_mark_identified([{
-                "paper_id": paper.arxiv_id,
-                "chunk_id": f"{paper.arxiv_id}::abstract",
-                "text": (
-                    f"{paper.title}\n"
-                    f"Authors: {authors}\n"
-                    f"Submitted: {paper.published[:10]}\n\n"
-                    f"{paper.abstract}"
-                ),
-            }]))
-        return [
-            {"paper_id": p.arxiv_id, "title": p.title, "published": p.published[:10],
-             "abstract": p.abstract[:300]}
-            for p in papers
-        ]
 
     if name == "find_related_papers":
         results, method = related.find_best_effort(args["paper_id"], limit=args.get("limit", 8))
