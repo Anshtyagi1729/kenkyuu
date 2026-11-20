@@ -9,10 +9,17 @@ agent actually needs deep grounding on (opened, saved, being compared) — and
 cached, so re-requesting an already-ingested paper is a no-op.
 """
 
+import json
+import logging
 import tempfile
+from pathlib import Path
 
-from app.ingestion import arxiv_client, embed, pdf_parser, semantic_scholar_client
+import requests
+
+from app.ingestion import arxiv_client, embed, openalex_client, pdf_parser, semantic_scholar_client
 from app.storage import db, vector_store
+
+logger = logging.getLogger(__name__)
 
 ABSTRACT_CHUNK_INDEX = -1
 
@@ -100,54 +107,107 @@ def record_search_result(paper: arxiv_client.ArxivPaper) -> None:
     _index_abstract(paper.arxiv_id, paper.title, paper.abstract, paper.authors)
 
 
-def record_s2_paper(paper: semantic_scholar_client.S2Paper) -> str | None:
-    """Records a Semantic Scholar paper into the corpus. Returns the id it was stored
-    under, or None if it carried no usable identifier.
+def record_external(
+    *,
+    source: str,
+    title: str,
+    abstract: str | None,
+    authors: list[str],
+    year: int | None,
+    publication_date: str | None = None,
+    arxiv_id: str | None = None,
+    doi: str | None = None,
+    fallback_id: str | None = None,
+    citation_count: int | None = None,
+    venue: str | None = None,
+    s2_paper_id: str | None = None,
+    extra_ids: dict | None = None,
+) -> str | None:
+    """Records a paper found by any live source. Returns the corpus id it lives under.
 
-    This closes a real gap. Until now only arXiv papers could be ingested, so a paper
-    published at IEEE, Springer, Elsevier or ACM with no preprint could be FOUND via
-    Semantic Scholar and then never cited in an answer - synthesis quotes only
-    retrieved passages, and nothing had put one in the index. A professor's own journal
-    paper was therefore permanently unquotable, which is close to the worst possible
-    gap for the intended user.
+    One path for Semantic Scholar, OpenAlex and Crossref, because the rules that matter
+    are the same for all three and each is easy to get wrong:
 
-    Keyed on the arXiv id when S2 reports one, so a paper reachable both ways collapses
-    onto a single row instead of appearing twice under two identifiers. Falls back to
-    S2's own paperId, which is stable.
+    1. **Resolve to an existing row before writing.** By arXiv id (version-insensitive),
+       then by DOI, so a paper found through two sources is one paper. The id falls
+       back to the source's own identifier only for a paper the corpus has never seen.
+       Writing under the caller's id instead would create a second abstract chunk for a
+       paper already indexed - `1706.03762` beside `1706.03762v7` - and the duplicate
+       would compete with the original in every ranking.
+    2. **Fill gaps, never overwrite.** A live source must not erase an abstract, rewrite
+       a real submission date, or replace crawl metrics the ranker reads as features.
+    3. **Index something even without an abstract**, so the paper is retrievable at all.
 
-    Citation metrics are written alongside, so the scorecard works for these papers
-    too - otherwise a non-arXiv paper would display as having no measured impact, which
-    reads as "uncited" rather than "never looked up".
+    Ids must be slash-free because they appear in URL paths; DOIs therefore cannot be
+    ids, and an OpenAlex work id ("W4391...") is used instead.
     """
-    ids = paper.external_ids or {}
-    paper_id = ids.get("ArXiv") or paper.paper_id
-    if not paper_id:
+    existing = (db.get_paper(arxiv_id) if arxiv_id else None) or (
+        db.get_paper(db.find_paper_by_doi(doi)) if doi and db.find_paper_by_doi(doi) else None
+    )
+    paper_id = existing["paper_id"] if existing else (arxiv_id or fallback_id)
+    if not paper_id or "/" in paper_id:
         return None
 
-    db.upsert_paper(
+    ids = dict(extra_ids or {})
+    if arxiv_id:
+        ids["ArXiv"] = arxiv_id
+    if doi:
+        ids["DOI"] = doi
+
+    db.merge_external_paper(
         paper_id=paper_id,
+        source=source,
+        title=title,
+        abstract=abstract,
+        authors=authors,
+        # A bare year is stored as January 1st so the column stays a sortable ISO date;
+        # the day and month are not real, which is why it never overwrites a real date.
+        published=publication_date or (f"{year}-01-01" if year else None),
+        external_ids=ids,
+    )
+    db.insert_metrics_if_absent(paper_id, s2_paper_id, citation_count, venue, year)
+    row = db.get_paper(paper_id)
+    _index_abstract(paper_id, row["title"], row["abstract"], json.loads(row["authors"] or "[]"))
+    return paper_id
+
+
+def record_s2_paper(paper: semantic_scholar_client.S2Paper) -> str | None:
+    """Records a Semantic Scholar paper. See record_external for the rules applied."""
+    ids = paper.external_ids or {}
+    return record_external(
         source="semantic_scholar",
         title=paper.title,
         abstract=paper.abstract,
-        # S2 gives a year, not a date. Stored as January 1st so the column stays a
-        # sortable ISO date; the day and month are not real and nothing should read
-        # them as such.
         authors=paper.authors,
-        published=f"{paper.year}-01-01" if paper.year else None,
-        external_ids=ids,
-    )
-    db.upsert_paper_metrics(
-        paper_id=paper_id,
-        s2_paper_id=paper.paper_id,
+        year=paper.year,
+        arxiv_id=ids.get("ArXiv"),
+        doi=ids.get("DOI"),
+        fallback_id=paper.paper_id,
         citation_count=paper.citation_count,
-        influential_citation_count=None,
-        reference_count=None,
-        venue=None,
-        cohort_year=paper.year,
-        primary_category=None,
+        s2_paper_id=paper.paper_id,
+        extra_ids={k: v for k, v in ids.items() if k not in ("ArXiv", "DOI")},
     )
-    _index_abstract(paper_id, paper.title, paper.abstract, paper.authors)
-    return paper_id
+
+
+def record_openalex_work(work: openalex_client.OpenAlexWork) -> str | None:
+    """Records an OpenAlex work, keeping its open-access PDF link for full-text reading."""
+    extra = {"OpenAlex": work.openalex_id}
+    if work.pdf_url:
+        extra["OpenAccessPdf"] = work.pdf_url
+    return record_external(
+        source="openalex",
+        title=work.title,
+        abstract=work.abstract,
+        authors=work.authors,
+        year=work.year,
+        publication_date=work.publication_date,
+        arxiv_id=work.arxiv_id,
+        doi=work.doi,
+        fallback_id=work.openalex_id,
+        citation_count=work.citation_count,
+        venue=work.venue,
+        extra_ids=extra,
+    )
 
 
 def index_abstracts(
@@ -257,6 +317,56 @@ def search_author_and_record(
     return papers
 
 
+OPEN_ACCESS_USER_AGENT = "kenkyuu-research-agent/0.1"
+MAX_PDF_BYTES = 40 * 1024 * 1024
+
+
+def full_text_source(paper_row: dict) -> tuple[str, str] | None:
+    """Where this paper's full text can be read, as ("arxiv" | "open_access", url).
+
+    arXiv first, because its PDFs are reliable and consistently formatted. Otherwise
+    the open-access PDF OpenAlex reported. None when neither exists - which for many
+    journal papers is simply the truth, and must be reported as such rather than
+    papered over by passing the abstract off as the paper.
+
+    Previously every paper was fetched from arxiv.org/pdf/<paper_id>, which for a
+    journal paper keyed by an OpenAlex or Semantic Scholar id is a guaranteed 404: no
+    non-arXiv paper could ever be read in full, open access or not.
+    """
+    ids = json.loads(paper_row.get("external_ids") or "{}")
+    arxiv_id = ids.get("ArXiv")
+    if not arxiv_id and paper_row.get("source") == "arxiv":
+        arxiv_id = paper_row["paper_id"]
+    if arxiv_id:
+        return "arxiv", arxiv_client.pdf_url_for(arxiv_id)
+    if ids.get("OpenAccessPdf"):
+        return "open_access", ids["OpenAccessPdf"]
+    return None
+
+
+def _fetch_open_access_pdf(url: str, dest_dir: str) -> str | None:
+    """Downloads an open-access PDF, or returns None if what came back is not one.
+
+    The check on the first bytes is the important part. "Open access" links frequently
+    resolve to an HTML landing page, a cookie wall or a login form, which the PDF
+    parser would otherwise attempt to read as a paper.
+    """
+    try:
+        resp = requests.get(
+            url, headers={"User-Agent": OPEN_ACCESS_USER_AGENT}, timeout=45, allow_redirects=True
+        )
+        resp.raise_for_status()
+    except requests.RequestException as exc:
+        logger.info("open-access PDF fetch failed for %s: %s", url, str(exc)[:120])
+        return None
+    if not resp.content.startswith(b"%PDF") or len(resp.content) > MAX_PDF_BYTES:
+        logger.info("open-access link did not return a usable PDF: %s", url)
+        return None
+    dest = Path(dest_dir) / "paper.pdf"
+    dest.write_bytes(resp.content)
+    return str(dest)
+
+
 def ingest_full_text(paper_id: str) -> int:
     """Lazy, cached full-text ingestion. Returns the number of body chunks stored
     (0 if the paper isn't known yet, or if it was already ingested)."""
@@ -266,9 +376,23 @@ def ingest_full_text(paper_id: str) -> int:
     paper_row = db.get_paper(paper_id)
     if paper_row is None:
         return 0
+    paper_id = paper_row["paper_id"]
+    if db.has_full_text(paper_id):
+        return 0
+
+    source = full_text_source(paper_row)
+    if source is None:
+        logger.info("no openly available full text for %s", paper_id)
+        return 0
 
     with tempfile.TemporaryDirectory() as tmp_dir:
-        pdf_path = arxiv_client.fetch_pdf(arxiv_client.pdf_url_for(paper_id), tmp_dir)
+        kind, url = source
+        if kind == "arxiv":
+            pdf_path = arxiv_client.fetch_pdf(url, tmp_dir)
+        else:
+            pdf_path = _fetch_open_access_pdf(url, tmp_dir)
+            if pdf_path is None:
+                return 0
         chunks = pdf_parser.parse_and_chunk(pdf_path)
         # PDF is only needed transiently to extract text; we don't keep it on disk.
 
