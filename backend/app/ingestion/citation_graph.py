@@ -36,8 +36,19 @@ def _node_id(neighbor: semantic_scholar_client.S2Paper) -> str:
 
 
 def _upsert_neighbor(neighbor: semantic_scholar_client.S2Paper) -> str:
+    """Records a graph neighbour so its node can be opened, filling gaps only.
+
+    Must never overwrite. This used the replacing upsert, so merely viewing a citation
+    graph rewrote every corpus neighbour with Semantic Scholar's copy: 102 crawl papers
+    had their arXiv submission dates replaced by a bare year (BERT, submitted 2018-10-11,
+    showed "2019") and their arXiv abstracts by S2's. Returns the id of the existing row
+    when there is one, so a node opens the paper the corpus already holds.
+    """
     node_id = _node_id(neighbor)
-    db.upsert_paper(
+    existing = db.get_paper(node_id)
+    if existing is not None:
+        node_id = existing["paper_id"]
+    db.merge_external_paper(
         paper_id=node_id,
         source="arxiv" if neighbor.external_ids.get("ArXiv") else "semantic_scholar",
         title=neighbor.title,

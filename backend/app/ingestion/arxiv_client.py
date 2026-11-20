@@ -178,7 +178,12 @@ def _run_query(
         },
         **({"attempts": RETRY_ATTEMPTS, "base_delay": RETRY_BASE_DELAY} if patient else {}),
     )
-    feed = feedparser.parse(resp.content)
+    return _parse_feed(resp.content)
+
+
+def _parse_feed(content: bytes) -> list[ArxivPaper]:
+    """Turns an arXiv Atom response into papers. Shared by search and id lookup."""
+    feed = feedparser.parse(content)
 
     papers = []
     for entry in feed.entries:
@@ -266,6 +271,21 @@ def search_by_author(
         clauses.append(f"submittedDate:[{start_year}01010000 TO {end_year}12312359]")
 
     return _run_query(" AND ".join(clauses), max_results, sort="recency")
+
+
+def fetch_by_ids(arxiv_ids: list[str], batch_size: int = 100) -> list[ArxivPaper]:
+    """The arXiv records for specific ids, many per request.
+
+    arXiv's `id_list` parameter accepts a comma-separated list, so restoring metadata
+    for a hundred papers costs one request instead of a hundred - which matters under a
+    one-request-per-three-seconds limit. Ids without a version return the latest.
+    """
+    papers: list[ArxivPaper] = []
+    for start in range(0, len(arxiv_ids), batch_size):
+        batch = arxiv_ids[start:start + batch_size]
+        resp = _get_with_backoff({"id_list": ",".join(batch), "max_results": len(batch)})
+        papers.extend(_parse_feed(resp.content))
+    return papers
 
 
 def list_cohort(category: str, year: int, start: int = 0, page_size: int = 100) -> list[ArxivPaper]:
