@@ -12,6 +12,11 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 S2_API_KEY = os.getenv("S2_API_KEY", "")
 
+# OpenAlex needs no key. Setting a contact address joins its "polite pool", which is
+# faster and more reliable under load. Deliberately empty by default: an address is
+# personal data sent to a third party, and that is the operator's decision to make.
+OPENALEX_MAILTO = os.getenv("OPENALEX_MAILTO", "")
+
 CHROMA_DIR = str(BASE_DIR / os.getenv("CHROMA_DIR", "data/chroma"))
 SQLITE_PATH = str(BASE_DIR / os.getenv("SQLITE_PATH", "data/papers.db"))
 CACHE_DIR = str(BASE_DIR / os.getenv("CACHE_DIR", "data/cache"))
