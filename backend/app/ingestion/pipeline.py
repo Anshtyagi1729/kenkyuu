@@ -160,9 +160,10 @@ def record_external(
         title=title,
         abstract=abstract,
         authors=authors,
-        # A bare year is stored as January 1st so the column stays a sortable ISO date;
-        # the day and month are not real, which is why it never overwrites a real date.
-        published=publication_date or (f"{year}-01-01" if year else None),
+        # A bare year is stored as just the year. It used to be padded to January 1st,
+        # and the paper page then displayed "2026-01-01" for a paper whose day and
+        # month nobody knows. "2026" still sorts correctly against full ISO dates.
+        published=publication_date or (str(year) if year else None),
         external_ids=ids,
     )
     db.insert_metrics_if_absent(paper_id, s2_paper_id, citation_count, venue, year)

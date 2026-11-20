@@ -522,11 +522,16 @@ def merge_external_paper(
             UPDATE papers SET
                 abstract = COALESCE(abstract, ?),
                 authors = CASE WHEN authors IS NULL OR authors = '[]' THEN ? ELSE authors END,
-                published = COALESCE(published, ?),
+                published = CASE
+                    WHEN ? IS NOT NULL AND (published IS NULL OR LENGTH(published) < LENGTH(?))
+                    THEN ? ELSE published END,
                 external_ids = ?
             WHERE paper_id = ?
             """,
-            (abstract, json.dumps(authors), published, json.dumps(merged_ids), existing["paper_id"]),
+            # A date only ever gains precision: a bare year ("2026") may be replaced by a
+            # full date from a later source, never the other way round.
+            (abstract, json.dumps(authors), published, published, published,
+             json.dumps(merged_ids), existing["paper_id"]),
         )
 
 
