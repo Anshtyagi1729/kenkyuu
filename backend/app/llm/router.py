@@ -72,6 +72,35 @@ _PROVIDERS = [
 _PROVIDER_BY_NAME = {p.name: p for p in _PROVIDERS}
 
 
+def _configure_retries() -> None:
+    """Lets a rate limit reach the router when there is somewhere else to go.
+
+    The OpenAI SDK retries a 429 internally, sleeping for the provider's Retry-After -
+    measured on Groq's free tier at 12 to 46 seconds per call. While it sleeps, the
+    router never sees the error, so the fall-through to Gemini or OpenRouter that this
+    module exists for never happens: a question that should have moved to the next
+    provider in a second instead waited out Groq's quota, and a four-call answer took
+    nearly two minutes.
+
+    With more than one provider configured, the SDK's own retries are turned off and the
+    router falls through immediately. With only one, they stay on - there is nowhere
+    else to go, and waiting out the limit beats failing the request.
+    """
+    available = [p for p in _PROVIDERS if p.available]
+    if len(available) > 1:
+        for provider in available:
+            provider.client = provider.client.with_options(max_retries=0)
+    logger.info(
+        "LLM providers configured: %s%s",
+        ", ".join(p.name for p in available) or "none",
+        " (immediate fall-through on rate limits)" if len(available) > 1 else
+        " (single provider: rate limits are waited out - add another key to avoid this)",
+    )
+
+
+_configure_retries()
+
+
 # Deliberately NOT caching LLM completions app-side (@cached(ttl_seconds=LLM_CACHE_TTL_SECONDS)
 # above this def, if re-enabled). Exact-match response caching only hits on byte-identical
 # repeat queries (~30% hit rate industry-wide) and adds no value here: Groq auto-caches the
