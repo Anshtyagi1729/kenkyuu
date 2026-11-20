@@ -28,11 +28,11 @@ const STARTERS: Starter[] = [
   },
   {
     capability: "Citation-network neighbours",
-    prompt: "what should I read alongside 1706.03762?",
+    prompt: "what should I read alongside Attention Is All You Need?",
   },
   {
     capability: "Compare two papers",
-    prompt: "compare the evaluation setups of 1706.03762 and 1810.04805",
+    prompt: "compare the evaluation setups of BERT and the original Transformer paper",
   },
   {
     capability: "Measured impact",
