@@ -35,7 +35,7 @@ export default function CitationGraphPage({ params }: PageProps<"/paper/[id]/gra
   const error = current?.error ?? null;
 
   return (
-    <main className="mx-auto flex w-full min-h-0 max-w-5xl flex-1 flex-col gap-4 px-6 py-8">
+    <main className="mx-auto flex w-full min-h-0 max-w-6xl flex-1 flex-col gap-4 px-6 py-8">
       <Link
         href={`/paper/${encodeURIComponent(paperId)}`}
         className="shrink-0 text-sm text-foreground-muted hover:text-accent"
@@ -48,7 +48,7 @@ export default function CitationGraphPage({ params }: PageProps<"/paper/[id]/gra
           {paper?.title ?? (error ? "Citation graph" : "Loading…")}
         </h1>
         <p className="text-sm text-foreground-muted">
-          References and citing papers. Click a node for details, then Expand to pull in its neighbors too.
+          What this paper builds on, and what has built on it since, arranged by publication year.
         </p>
       </div>
 

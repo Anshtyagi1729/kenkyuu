@@ -134,6 +134,10 @@ export interface GraphNode {
   paper_id: string;
   title: string;
   year: number | null;
+  citation_count?: number | null;
+  /** "center" for the paper itself, "reference" for papers it cites, "citation" for
+   * papers citing it. Absent from older responses. */
+  relation?: "center" | "reference" | "citation" | null;
 }
 
 export interface GraphEdge {
@@ -144,6 +148,11 @@ export interface GraphEdge {
 export interface CitationGraphData {
   nodes: GraphNode[];
   edges: GraphEdge[];
+  /** Which service the neighbourhood came from: "openalex" or "semantic_scholar". */
+  source?: string | null;
+  /** Totals before truncation, so the page can say "20 of 96 shown". */
+  total_references?: number | null;
+  total_citations?: number | null;
 }
 
 export function getCitationGraph(paperId: string): Promise<CitationGraphData> {
