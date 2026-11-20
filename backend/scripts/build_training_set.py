@@ -50,7 +50,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--queries", type=int, default=1200)
     parser.add_argument("--citation-per-bucket", type=int, default=150)
-    parser.add_argument("--title-queries", type=int, default=600)
+    parser.add_argument("--title-queries", type=int, default=0)
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s", datefmt="%H:%M:%S")
@@ -59,10 +59,15 @@ def main() -> None:
     # add real lookup signal without reintroducing the skew.
     examples = td.build_synthetic(limit=args.queries)
     examples += td.build_citation_balanced(per_bucket=args.citation_per_bucket)
-    # Title lookups are a THIRD query shape, not more of the same. Without them the
-    # model never sees a query that IS a paper's title, and it measurably mishandles
-    # them - see build_title_lookups for the failures that motivated this.
-    examples += td.build_title_lookups(limit=args.title_queries)
+    # Title lookups are OFF by default. They were added to fix exact-title queries and
+    # measurably hurt the main benchmark instead: across eight seeds the shipped
+    # configuration averaged 0.6903 nDCG@10 with them, every seed below the 0.7593 of
+    # the model trained without them. Being trivially solved by text features, they
+    # teach the model to trust text everywhere. Exact titles are now handled by
+    # rerank.promote_known_items. Kept available behind the flag so the negative
+    # result can be reproduced.
+    if args.title_queries:
+        examples += td.build_title_lookups(limit=args.title_queries)
     logger.info("Total training queries: %d", len(examples))
 
     metrics, titles = load_metrics(), load_titles()
