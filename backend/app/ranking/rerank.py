@@ -19,6 +19,7 @@ from functools import lru_cache
 
 from app.config import BASE_DIR
 from app.ingestion import lexical, retrieval
+from app.ranking import identity
 from app.ranking.features import Features, extract
 from app.ranking.model import TrainedRanker
 from app.storage import db, vector_store
@@ -195,15 +196,44 @@ def search_ranked(
     """
     ranker = _shipped_ranker()
     if ranker is None:
-        return retrieval.search(
+        hits = retrieval.search(
             query,
-            top_k=top_k,
-            fetch_k=POOL_SIZE,
+            top_k=POOL_SIZE,
+            fetch_k=POOL_SIZE * 2,
             collection=collection,
             citation_weight=fallback_citation_weight,
         )
+    else:
+        pool = candidate_pool(query, collection=collection)
+        hits = rank(ranker, query, pool) if pool else []
+    return promote_known_items(query, hits)[:top_k]
 
-    pool = candidate_pool(query, collection=collection)
-    if not pool:
-        return []
-    return rank(ranker, query, pool)[:top_k]
+
+def promote_known_items(query: str, hits: list[dict]) -> list[dict]:
+    """Moves any candidate whose title IS the query to the front, keeping order otherwise.
+
+    Known-item search (Broder, 2002, "navigational" queries): the user already knows
+    which document they want and is naming it. That is a different task from finding
+    papers relevant to a topic, and it should not hinge on a learned ranker
+    generalising to it - an exact title is deterministic evidence of identity.
+
+    Measured necessity, not tidiness. Across eight retrains the model put "attention is
+    all you need" anywhere from rank 2 to rank 5, behind papers titled "Not All
+    Attention Is All You Need" and similar. The feature set has no way to see the
+    difference: `title_overlap` measures how much of the QUERY a title covers, which is
+    1.0 for every one of them. Teaching it through 600 extra title-lookup training
+    queries was tried and measurably hurt the main benchmark (seed mean 0.6903 against
+    0.7593), because those queries are trivially solved by text features and so teach
+    the model to trust text everywhere - the opposite of what the landmark queries need.
+
+    So identity is decided by a rule and relevance by the model, each where it is
+    reliable. A stable sort means several known-item matches keep the model's order
+    among themselves, and a query that names no title changes nothing at all.
+    """
+    if not hits:
+        return hits
+    titles = context().titles
+    return sorted(
+        hits,
+        key=lambda h: not identity.is_known_item(query, h.get("title") or titles.get(h["paper_id"], "")),
+    )
