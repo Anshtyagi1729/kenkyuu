@@ -72,6 +72,19 @@ CANDIDATE_CONFIGS = {
 }
 
 
+def _shipped_exclusions() -> list[str]:
+    """Features the shipped model is trained WITHOUT, from the one place that decides it.
+
+    The seed and round-sweep sections must measure the configuration that actually
+    ships. They previously hardcoded "text + graph centrality" - left over from when
+    that briefly was the shipped configuration - so after the revert to all features
+    the noise floor was being measured on a different model from the one in use.
+    """
+    from scripts.train_ranker import DEFAULT_EXCLUDED_GROUPS
+
+    return [f for g in DEFAULT_EXCLUDED_GROUPS for f in FEATURE_GROUPS[g]]
+
+
 def build_pools(queries: list[harness.EvalQuery], pool_size: int) -> dict:
     """Retrieves and featurizes each query's candidates once, then caches.
 
@@ -239,8 +252,7 @@ def main() -> None:
     rows = rows + [("", {"ndcg": 0, "mrr": 0, "landmark": 0, "obscure": 0}, None)] + config_rows
 
     if args.sweep_rounds:
-        shipped = [f for g, feats in FEATURE_GROUPS.items()
-                   if g not in ("text relevance", "graph centrality") for f in feats]
+        shipped = _shipped_exclusions()
         print("\nROUND SWEEP — shipped configuration, early stopping disabled")
         print(header)
         print("-" * len(header))
@@ -248,14 +260,13 @@ def main() -> None:
         for n in args.sweep_rounds:
             variant, _ = train(groups, names, num_rounds=n, exclude=shipped, early_stopping=False)
             s = split_scores(harness.evaluate(model_system(variant, pools, by_query), queries))
-            sweep_rows.append((f"text+centrality, {n} rounds", s, s["ndcg"] - full["ndcg"]))
+            sweep_rows.append((f"shipped config, {n} rounds", s, s["ndcg"] - full["ndcg"]))
             print(f"{sweep_rows[-1][0]:<32}{s['ndcg']:>10.4f}{s['mrr']:>9.4f}"
                   f"{s['landmark']:>11.4f}{s['obscure']:>10.4f}{sweep_rows[-1][2]:>+10.4f}")
         rows = rows + [("", {"ndcg": 0, "mrr": 0, "landmark": 0, "obscure": 0}, None)] + sweep_rows
 
     if args.seeds:
-        shipped = [f for g, feats in FEATURE_GROUPS.items()
-                   if g not in ("text relevance", "graph centrality") for f in feats]
+        shipped = _shipped_exclusions()
         print(f"\nSEED VARIANCE — shipped configuration retrained {args.seeds}x")
         print("  Same data, same features, only the train/valid split differs. The spread")
         print("  here is the floor on what a difference between two rows above can mean.")
