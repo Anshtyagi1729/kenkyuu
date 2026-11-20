@@ -114,8 +114,11 @@ def learned(query: str, k: int) -> list[str]:
     here rather than computed in a one-off script: a headline number that only some
     vanished script can reproduce is not a result.
     """
-    pool = rerank.candidate_pool(query, collection=EVAL_COLLECTION)
-    return _to_paper_ranking(rerank.rank(_ranker(), query, pool))[:k]
+    # The exact shipped path, known-item promotion included, so this row measures what
+    # users get rather than the model in isolation (scripts.ablate measures that).
+    _ranker()  # fail loudly here if the model is missing, rather than silently falling back
+    hits = rerank.search_ranked(query, top_k=rerank.POOL_SIZE, collection=EVAL_COLLECTION)
+    return _to_paper_ranking(hits)[:k]
 
 
 SYSTEMS: dict[str, harness.RetrievalFn] = {
