@@ -142,7 +142,10 @@ def _ordinal_clause(percentile: float | None) -> str:
     fact, and the second is the one a reader feels."""
     if percentile is None:
         return ""
-    top = 100.0 - percentile
+    # Floored at 0.1, as the interface does: the most central papers sit above the 99.95th
+    # percentile, and one-decimal rounding rendered them as "top 0.0%", which reads as
+    # an error rather than as the top of the distribution.
+    top = max(100.0 - percentile, 0.1)
     if top < 1.0:
         return f"top {top:.1f}% of the corpus"
     return f"{percentile:.0f}th percentile"
