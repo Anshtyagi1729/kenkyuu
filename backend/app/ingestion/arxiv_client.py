@@ -43,6 +43,14 @@ MIN_REQUEST_INTERVAL = 3.0
 RETRY_ATTEMPTS = 5
 RETRY_BASE_DELAY = 15.0
 
+# ...and that patience belongs to the crawl alone. Inside a user's request the same
+# budget means up to four minutes of silence before failing anyway, while OpenAlex and
+# Crossref could have answered in two seconds. Interactive calls fail fast and let the
+# other sources carry the query; the background crawl, which has nothing better to do,
+# keeps waiting out the penalty.
+INTERACTIVE_RETRY_ATTEMPTS = 2
+INTERACTIVE_RETRY_DELAY = 2.0
+
 _last_request_at = 0.0
 _lock = Lock()
 
@@ -128,14 +136,18 @@ def _scoped(query: str, categories: Sequence[str] | None) -> str:
     return f"({grouped}) AND {clause}"
 
 
-def _get_with_backoff(params: dict) -> requests.Response:
+def _get_with_backoff(
+    params: dict,
+    attempts: int = INTERACTIVE_RETRY_ATTEMPTS,
+    base_delay: float = INTERACTIVE_RETRY_DELAY,
+) -> requests.Response:
     """GET against the arXiv API, retrying rate limits with exponential backoff.
 
     Only 429 is retried - a malformed query or a server error will fail the same way
     on every attempt, so retrying those just burns the rate-limit budget.
     """
-    delay = RETRY_BASE_DELAY
-    for attempt in range(1, RETRY_ATTEMPTS + 1):
+    delay = base_delay
+    for attempt in range(1, attempts + 1):
         _throttle()
         resp = requests.get(ARXIV_API_URL, params=params, headers=REQUEST_HEADERS, timeout=30)
 
@@ -143,17 +155,19 @@ def _get_with_backoff(params: dict) -> requests.Response:
             resp.raise_for_status()
             return resp
 
-        if attempt == RETRY_ATTEMPTS:
+        if attempt == attempts:
             resp.raise_for_status()
 
-        logger.info("arXiv rate limited (attempt %d/%d) - retrying in %.0fs", attempt, RETRY_ATTEMPTS, delay)
+        logger.info("arXiv rate limited (attempt %d/%d) - retrying in %.0fs", attempt, attempts, delay)
         time.sleep(delay)
         delay *= 2
 
     raise RuntimeError("unreachable: loop always returns or raises")
 
 
-def _run_query(search_query: str, max_results: int, sort: str, start: int = 0) -> list[ArxivPaper]:
+def _run_query(
+    search_query: str, max_results: int, sort: str, start: int = 0, patient: bool = False
+) -> list[ArxivPaper]:
     resp = _get_with_backoff(
         {
             "search_query": search_query,
@@ -161,7 +175,8 @@ def _run_query(search_query: str, max_results: int, sort: str, start: int = 0) -
             "max_results": max_results,
             "sortBy": SORT_MODES.get(sort, "relevance"),
             "sortOrder": "descending",
-        }
+        },
+        **({"attempts": RETRY_ATTEMPTS, "base_delay": RETRY_BASE_DELAY} if patient else {}),
     )
     feed = feedparser.parse(resp.content)
 
@@ -266,7 +281,7 @@ def list_cohort(category: str, year: int, start: int = 0, page_size: int = 100) 
     only burn disk.
     """
     window = f"submittedDate:[{year}01010000 TO {year}12312359]"
-    return _run_query(f"cat:{category} AND {window}", page_size, sort="recency", start=start)
+    return _run_query(f"cat:{category} AND {window}", page_size, sort="recency", start=start, patient=True)
 
 
 def pdf_url_for(arxiv_id: str) -> str:
