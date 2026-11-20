@@ -31,8 +31,8 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
       className={`${geistSans.variable} ${geistMono.variable} ${sourceSerif.variable} h-full antialiased`}
     >
       <body className="flex h-screen flex-col overflow-hidden bg-background text-foreground">
-        <nav className="flex shrink-0 items-center gap-6 border-b border-border px-6 py-4">
-          <span className="font-serif text-[15px] font-semibold tracking-tight text-foreground">
+        <nav className="flex shrink-0 items-center gap-3 border-b border-border px-4 py-4 sm:gap-6 sm:px-6">
+          <span className="shrink-0 font-serif text-[15px] font-semibold tracking-tight whitespace-nowrap text-foreground">
             Paper Agent
           </span>
           <NavLinks />

@@ -20,7 +20,10 @@ export default function NavLinks() {
   const pathname = usePathname() ?? "";
 
   return (
-    <div className="flex gap-1 text-sm">
+    // On a phone the brand and four links need about 460px of a 375px screen. The row
+    // scrolls sideways instead of clipping "History" off the edge; on wider screens it
+    // simply fits.
+    <div className="flex min-w-0 gap-0.5 overflow-x-auto text-[13px] [scrollbar-width:none] sm:gap-1 sm:text-sm">
       {LINKS.map(({ href, label }) => {
         const active =
           pathname === href ||
@@ -31,7 +34,7 @@ export default function NavLinks() {
             key={href}
             href={href}
             aria-current={active ? "page" : undefined}
-            className={`rounded-full px-3 py-1.5 transition-colors ${
+            className={`shrink-0 rounded-full px-2 py-1.5 whitespace-nowrap transition-colors sm:px-3 ${
               active
                 ? "bg-accent-soft font-medium text-accent-hover"
                 : "text-foreground-muted hover:bg-surface-muted hover:text-accent"
