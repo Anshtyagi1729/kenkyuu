@@ -3,16 +3,8 @@ import ReactMarkdown, { type Components } from "react-markdown";
 import rehypeKatex from "rehype-katex";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
-
-// Matches both "[2406.16167v1]" and bare "2406.16167v1" - models are asked to always
-// bracket citations but don't reliably do so inside markdown tables in practice.
-// Every match gets rewritten into a proper markdown link so ReactMarkdown renders it
-// through the custom `a` component below, regardless of the original formatting.
-const ARXIV_ID_TOKEN = /\[?(\d{4}\.\d{4,5}(?:v\d+)?)\]?/g;
-
-function linkifyCitations(text: string): string {
-  return text.replace(ARXIV_ID_TOKEN, (_match, id: string) => `[${id}](/paper/${id})`);
-}
+import CitationChip from "@/components/CitationChip";
+import { linkifyCitations } from "@/lib/citations";
 
 // remark-math only recognizes $...$ / $$...$$ delimiters, but text pulled from paper
 // PDFs (and models echoing that source formatting) commonly uses LaTeX's own \(...\) /
@@ -35,11 +27,12 @@ function normalizeLatexDelimiters(text: string): string {
 const components: Components = {
   a: ({ href, children }) => {
     if (href?.startsWith("/paper/")) {
+      // Citations rewritten by linkifyCitations have a bare number as their text and
+      // render as numbered chips; any other link to a paper keeps its own text.
+      const text = Array.isArray(children) ? children.join("") : String(children ?? "");
+      if (/^\d+$/.test(text)) return <CitationChip number={text} href={href} />;
       return (
-        <Link
-          href={href}
-          className="mx-0.5 rounded-full bg-accent-soft px-1.5 py-0.5 text-[0.85em] font-medium text-accent-hover no-underline hover:bg-accent hover:text-white"
-        >
+        <Link href={href} className="text-accent underline hover:text-accent-hover">
           {children}
         </Link>
       );

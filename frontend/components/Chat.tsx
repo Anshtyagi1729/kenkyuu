@@ -4,6 +4,8 @@ import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import type { ChatTurn, Message, Source, StreamEvent } from "@/lib/api";
 import MarkdownAnswer from "@/components/MarkdownAnswer";
+import { citationOrder } from "@/lib/citations";
+import { canonicalPaperId } from "@/lib/formatMetrics";
 import AgentActivity from "@/components/AgentActivity";
 import { fetchPaper, peekPaper } from "@/lib/paperCache";
 
@@ -129,7 +131,7 @@ export default function Chat({ turns, onTurnsChange, onSend, placeholder, emptyS
                   <div className="rounded-2xl rounded-bl-sm border border-border bg-surface px-4 py-3">
                     <MarkdownAnswer text={turn.content} />
                   </div>
-                  {turn.sources && turn.sources.length > 0 && <SourceList sources={turn.sources} />}
+                  {turn.sources && turn.sources.length > 0 && <SourceList sources={turn.sources} answer={turn.content} />}
                 </div>
               )}
             </div>
@@ -212,26 +214,49 @@ function formatPages(sources: Source[]): string | null {
   return `p${pages.size > 1 ? "p" : ""}. ${ranges.join(", ")}`;
 }
 
-function SourceList({ sources }: { sources: Source[] }) {
+/** The papers an answer drew on, numbered to match its inline citations.
+ *
+ * Numbers come from the order papers are first cited in the answer, the same rule the
+ * citation chips use, so [2] in the text and 2 here are one paper. A source the answer
+ * never cites explicitly is listed after the cited ones, unnumbered. */
+function SourceList({ sources, answer }: { sources: Source[]; answer: string }) {
+  // Grouped by canonical id: two versions of one paper ("1810.04805" and
+  // "1810.04805v2") are one source, and were showing as two identical pills.
   const byPaper = new Map<string, Source[]>();
   for (const source of sources) {
-    if (!byPaper.has(source.paper_id)) byPaper.set(source.paper_id, []);
-    byPaper.get(source.paper_id)!.push(source);
+    const key = canonicalPaperId(source.paper_id);
+    if (!byPaper.has(key)) byPaper.set(key, []);
+    byPaper.get(key)!.push(source);
   }
+  const order = citationOrder(answer);
+  const numberOf = (paperId: string) => {
+    const index = order.indexOf(canonicalPaperId(paperId));
+    return index >= 0 ? index + 1 : null;
+  };
+  const entries = [...byPaper.entries()].sort(
+    ([a], [b]) => (numberOf(a) ?? Number.MAX_SAFE_INTEGER) - (numberOf(b) ?? Number.MAX_SAFE_INTEGER),
+  );
 
   return (
     <div className="flex flex-col gap-1.5">
       <span className="text-xs font-medium tracking-wide text-foreground-muted uppercase">Sources</span>
       <div className="flex flex-wrap gap-2">
-        {[...byPaper.entries()].map(([paperId, chunks]) => {
+        {entries.map(([key, chunks]) => {
+          const paperId = chunks[0].paper_id;
           const pages = formatPages(chunks);
+          const number = numberOf(key);
           return (
             <Link
-              key={paperId}
+              key={key}
               href={`/paper/${encodeURIComponent(paperId)}`}
               title={paperId}
-              className="flex max-w-[22rem] min-w-0 items-center rounded-full border border-border bg-surface px-3 py-1 text-xs font-medium text-foreground-muted transition-colors hover:border-accent hover:text-accent"
+              className="flex max-w-[22rem] min-w-0 items-center gap-1.5 rounded-full border border-border bg-surface py-1 pr-3 pl-1.5 text-xs font-medium text-foreground-muted transition-colors hover:border-accent hover:text-accent"
             >
+              {number !== null && (
+                <span className="inline-flex h-4 min-w-4 shrink-0 items-center justify-center rounded-md bg-accent-soft px-1 text-[10px] font-semibold text-accent-hover">
+                  {number}
+                </span>
+              )}
               <SourceLabel paperId={paperId} />
               {pages && <span className="shrink-0 text-foreground-muted/60"> · {pages}</span>}
             </Link>
