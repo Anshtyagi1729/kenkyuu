@@ -21,10 +21,16 @@ const TITLE_MAX_CHARS = 60;
  * page can return to the actual conversation you came from instead of always
  * landing on a brand new empty one - deliberately not based on browser history
  * (unreliable: doesn't exist for a middle-clicked new tab, a bookmark, etc). */
+// The "conversation to return to" pointer lives in sessionStorage, which is scoped to
+// one browser tab and cleared when it closes. Navigating Compare -> Search within a
+// visit still returns to the open conversation, which is what the pointer exists for.
+// In localStorage it outlived the visit, so opening the app days later dropped you
+// straight into whatever was last discussed. Conversations themselves are still kept
+// in localStorage and listed under History.
 export function getLastSearchSessionId(): string | null {
   if (typeof window === "undefined") return null;
   try {
-    return window.localStorage.getItem(LAST_SEARCH_SESSION_KEY);
+    return window.sessionStorage.getItem(LAST_SEARCH_SESSION_KEY);
   } catch {
     return null;
   }
@@ -32,7 +38,7 @@ export function getLastSearchSessionId(): string | null {
 
 export function setLastSearchSessionId(id: string): void {
   try {
-    window.localStorage.setItem(LAST_SEARCH_SESSION_KEY, id);
+    window.sessionStorage.setItem(LAST_SEARCH_SESSION_KEY, id);
   } catch {
     // storage disabled/full - "back to search" just falls back to a fresh chat
   }
