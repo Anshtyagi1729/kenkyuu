@@ -12,6 +12,10 @@ class Paper(BaseModel):
     authors: list[str]
     published: str | None
     external_ids: dict
+    # "indexed" when the full text has been read, "available" when an arXiv or
+    # open-access PDF exists to read on demand, "unavailable" when only the abstract (or
+    # title) is on record. Set by the single-paper route; None elsewhere.
+    full_text: str | None = None
 
 
 def paper_from_row(row: dict) -> Paper:
@@ -67,3 +71,4 @@ class PaperMetrics(BaseModel):
     cohort_year: int | None
     primary_category: str | None
     summary: str
+    cnci_note: str | None = None

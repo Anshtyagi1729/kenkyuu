@@ -21,6 +21,7 @@ from bisect import bisect_left, bisect_right
 from dataclasses import asdict, dataclass
 from functools import lru_cache
 
+from app.scientometrics import impact
 from app.storage import db
 
 logger = logging.getLogger(__name__)
@@ -52,6 +53,8 @@ class Scorecard:
     primary_category: str | None
 
     summary: str
+    # Why field-normalised impact is missing, in words, when it is. None when computed.
+    cnci_note: str | None = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -84,6 +87,32 @@ def _distributions() -> dict[str, list[float]]:
         ", ".join(f"{k}={len(v)}" for k, v in dists.items()),
     )
     return dists
+
+
+@lru_cache(maxsize=1)
+def _cohorts() -> dict:
+    """Cohort medians, loaded once (59 rows, changed only by a corpus rebuild)."""
+    return impact.load_cohorts()
+
+
+def cnci_unavailable_reason(citations: int | None, year: int | None, category: str | None) -> str | None:
+    """The actual reason a paper has no field-normalised impact, or None if it has one.
+
+    There are several, and they mean different things to a reader. The interface used
+    to give one for all of them - "too few 2026 papers in the corpus" - which is false
+    for 2026: the corpus holds 777 papers from that year. The real reason there is that
+    the median 2026 paper has no citations yet, so there is nothing to divide by.
+    """
+    if year is None:
+        return "No publication year on record, so there is no cohort to compare against."
+    if citations is None:
+        return "Citation count unknown."
+    cohort = impact.cohort_for(category, year, _cohorts())
+    if cohort is None or not cohort.is_reliable:
+        return f"Too few {year} papers in the corpus to set a reliable median."
+    if cohort.median_citations <= 0:
+        return f"The median {year} paper has no citations yet, so there is nothing to normalise against."
+    return None
 
 
 def percentile_of(value: float | None, metric: str) -> float | None:
@@ -137,8 +166,9 @@ def _summarize(card: "Scorecard") -> str:
     if card.cnci is not None and card.cohort_year is not None:
         field = card.primary_category or "all fields"
         parts.append(f"{card.cnci:,.1f}x the {card.cohort_year} median for {field}")
-    elif card.cohort_year is not None:
-        parts.append(f"{card.cohort_year} paper, too few cohort peers to normalize")
+    elif card.cnci_note:
+        note = card.cnci_note.rstrip(".")
+        parts.append("field-normalised impact not computable: " + note[0].lower() + note[1:])
 
     if card.pagerank is not None:
         centrality = "central in the citation network"
@@ -180,6 +210,8 @@ def _build(paper_id: str, title: str, row: dict | None) -> Scorecard:
         primary_category=row.get("primary_category"),
         summary="",
     )
+    if cnci is None:
+        card.cnci_note = cnci_unavailable_reason(citations, card.cohort_year, card.primary_category)
     card.summary = _summarize(card)
     return card
 

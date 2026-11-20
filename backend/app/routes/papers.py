@@ -2,7 +2,7 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from app.ingestion import citation_graph
+from app.ingestion import citation_graph, pipeline
 from app.llm.paper_chat import chat_about_paper_stream
 from app.llm.router import NoProviderAvailable
 from app.routes.schemas import Paper, PaperMetrics, paper_from_row, source_from_dict
@@ -52,7 +52,16 @@ def get_paper(paper_id: str) -> Paper:
     paper = db.get_paper(paper_id)
     if paper is None:
         raise HTTPException(status_code=404, detail=f"unknown paper_id: {paper_id}")
-    return paper_from_row(paper)
+    result = paper_from_row(paper)
+    # Lets the page describe its chat honestly: it used to promise answers "grounded in
+    # this paper's full text" for journal papers that have no openly available text.
+    if db.has_full_text(paper["paper_id"]):
+        result.full_text = "indexed"
+    elif pipeline.full_text_source(paper) is not None:
+        result.full_text = "available"
+    else:
+        result.full_text = "unavailable"
+    return result
 
 
 @router.get("/papers/{paper_id}/citation-graph", response_model=CitationGraph)

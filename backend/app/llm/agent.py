@@ -884,8 +884,8 @@ def _paper_metrics(paper_ids: list[str]) -> list[dict]:
         ):
             if value is not None:
                 entry[key] = value
-        if card.cnci is None and card.cohort_year is not None:
-            entry["note"] = "field-normalized impact not computable: too few cohort peers to trust a median"
+        if card.cnci_note:
+            entry["note"] = "field-normalized impact not computable: " + card.cnci_note
         out.append(entry)
     return out
 
