@@ -33,7 +33,11 @@ def cached(ttl_seconds: int):
     def decorator(fn):
         @functools.wraps(fn)
         def wrapper(*args, **kwargs):
-            key = _make_key(fn.__qualname__, args, kwargs)
+            # Module-qualified. A bare __qualname__ made arxiv_client.search,
+            # openalex_client.search and semantic_scholar_client.search share one key
+            # space, so OpenAlex and Semantic Scholar called with the same query and limit
+            # could be served each other's cached results.
+            key = _make_key(f"{fn.__module__}.{fn.__qualname__}", args, kwargs)
             hit = _cache.get(key, default=_MISS)
             if hit is not _MISS:
                 return hit
