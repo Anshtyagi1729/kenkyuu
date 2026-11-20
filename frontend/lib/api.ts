@@ -124,6 +124,9 @@ export interface Paper {
   authors: string[];
   published: string | null;
   external_ids: Record<string, string>;
+  /** "indexed": full text read; "available": an arXiv or open-access PDF exists;
+   * "unavailable": only the abstract or title is on record. Set on single-paper fetches. */
+  full_text?: "indexed" | "available" | "unavailable" | null;
 }
 
 export function getPaper(paperId: string): Promise<Paper> {
@@ -228,6 +231,8 @@ export interface PaperMetrics {
   primary_category: string | null;
   /** One human-readable sentence assembled server-side from whichever fields exist. */
   summary: string;
+  /** Why field-normalised impact is missing, when it is. */
+  cnci_note?: string | null;
 }
 
 export function getPaperMetrics(paperId: string): Promise<PaperMetrics> {

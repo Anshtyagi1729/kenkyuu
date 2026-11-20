@@ -115,10 +115,32 @@ function PaperPageInner({ params }: PageProps<"/paper/[id]">) {
                 · arXiv:{paper.external_ids.ArXiv}
               </a>
             )}
+            {/* A journal paper's only route to the publisher. Skipped for arXiv's own
+                DataCite DOIs (10.48550), which would just repeat the arXiv link. */}
+            {paper.external_ids?.DOI && !paper.external_ids.DOI.startsWith("10.48550") && (
+              <a
+                href={`https://doi.org/${paper.external_ids.DOI}`}
+                target="_blank"
+                rel="noreferrer"
+                className="text-accent hover:text-accent-hover"
+              >
+                · doi:{paper.external_ids.DOI}
+              </a>
+            )}
+            {paper.external_ids?.OpenAccessPdf && !paper.external_ids?.ArXiv && (
+              <a
+                href={paper.external_ids.OpenAccessPdf}
+                target="_blank"
+                rel="noreferrer"
+                className="text-accent hover:text-accent-hover"
+              >
+                · open-access PDF
+              </a>
+            )}
           </div>
           <Scorecard paperId={paperId} />
           {paper.abstract && (
-            <details className="group mt-1">
+            <details className="group mt-1" open>
               <summary className="flex w-fit cursor-pointer list-none items-center gap-1 text-xs font-medium text-foreground-muted hover:text-accent [&::-webkit-details-marker]:hidden">
                 Abstract
                 <span className="transition-transform group-open:rotate-90">›</span>
@@ -154,7 +176,9 @@ function PaperPageInner({ params }: PageProps<"/paper/[id]">) {
             placeholder="Ask something about this paper"
             emptyState={
               <p className="py-6 text-sm text-foreground-muted">
-                Ask about methodology, results, limitations — answers are grounded in this paper&apos;s full text.
+                {paper?.full_text === "unavailable"
+                  ? "No openly available full text exists for this paper, so answers can draw only on its abstract and metadata."
+                  : "Ask about methodology, results and limitations. Answers are grounded in this paper's full text."}
               </p>
             }
           />

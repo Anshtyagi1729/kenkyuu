@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import type { PaperMetrics } from "@/lib/api";
 import { formatMultiple, formatPercentile } from "@/lib/formatMetrics";
 import { fetchMetrics } from "@/lib/metricsCache";
+import { abbreviateVenue } from "@/lib/venues";
 
 /** The full scientometric scorecard for one paper.
  *
@@ -83,6 +84,9 @@ export default function Scorecard({ paperId }: { paperId: string }) {
     in_degree,
     venue,
   } = metrics;
+  // The short form in the large type: "Neural Information Processing Systems" wrapped
+  // over four lines and broke the row, while the badges already said "NeurIPS".
+  const venueLabel = abbreviateVenue(venue);
 
   const field = primary_category ?? "all fields";
 
@@ -99,9 +103,10 @@ export default function Scorecard({ paperId }: { paperId: string }) {
           value={cnci !== null ? formatMultiple(cnci) : null}
           detail={`the median ${cohort_year ?? ""} paper in ${field}`}
           missing={
-            cohort_year
-              ? `Too few ${cohort_year} papers in the corpus to establish a reliable median`
-              : "No submission year on record"
+            // The server says which reason applies. It used to be assumed here as "too
+            // few papers", which is false for 2026: the cohort is large, its median is 0.
+            metrics.cnci_note ??
+            (cohort_year ? `Too few ${cohort_year} papers in the corpus to set a reliable median` : "No publication year on record")
           }
         />
         <Stat
@@ -124,7 +129,12 @@ export default function Scorecard({ paperId }: { paperId: string }) {
           }
           missing="Not present in the citation graph"
         />
-        <Stat label="Venue" value={venue} detail="publication record" missing="Preprint, or venue unknown" />
+        <Stat
+          label="Venue"
+          value={venueLabel?.short ?? null}
+          detail={venueLabel?.abbreviated ? venueLabel.full : "publication record"}
+          missing="Preprint, or venue unknown"
+        />
       </div>
 
       <p className="mt-2 text-[11px] leading-relaxed text-foreground-muted">
