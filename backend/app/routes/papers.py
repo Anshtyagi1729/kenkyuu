@@ -26,6 +26,10 @@ class GraphNode(BaseModel):
     paper_id: str
     title: str
     year: int | None = None
+    citation_count: int | None = None
+    # "center", "reference" (the centre paper cites it) or "citation" (it cites the
+    # centre paper). Drives the graph's colour coding and two-sided layout.
+    relation: str | None = None
 
 
 class GraphEdge(BaseModel):
@@ -36,6 +40,11 @@ class GraphEdge(BaseModel):
 class CitationGraph(BaseModel):
     nodes: list[GraphNode]
     edges: list[GraphEdge]
+    source: str | None = None
+    # How many references and citing papers exist in total, so the page can say "20 of
+    # 96 shown" rather than imply the graph is complete.
+    total_references: int | None = None
+    total_citations: int | None = None
 
 
 @router.get("/papers/{paper_id}", response_model=Paper)

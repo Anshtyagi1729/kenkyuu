@@ -122,6 +122,7 @@ def record_external(
     venue: str | None = None,
     s2_paper_id: str | None = None,
     extra_ids: dict | None = None,
+    index: bool = True,
 ) -> str | None:
     """Records a paper found by any live source. Returns the corpus id it lives under.
 
@@ -167,8 +168,13 @@ def record_external(
         external_ids=ids,
     )
     db.insert_metrics_if_absent(paper_id, s2_paper_id, citation_count, venue, year)
-    row = db.get_paper(paper_id)
-    _index_abstract(paper_id, row["title"], row["abstract"], json.loads(row["authors"] or "[]"))
+    # Graph neighbours pass index=False: a citation graph surfaces up to forty papers at
+    # once, and embedding all of them would make the page wait on the embedding model
+    # for papers nobody has asked about yet. They are stored so their node opens, and are
+    # embedded later by the corpus "index" stage if they turn out to matter.
+    if index:
+        row = db.get_paper(paper_id)
+        _index_abstract(paper_id, row["title"], row["abstract"], json.loads(row["authors"] or "[]"))
     return paper_id
 
 
@@ -190,7 +196,7 @@ def record_s2_paper(paper: semantic_scholar_client.S2Paper) -> str | None:
     )
 
 
-def record_openalex_work(work: openalex_client.OpenAlexWork) -> str | None:
+def record_openalex_work(work: openalex_client.OpenAlexWork, index: bool = True) -> str | None:
     """Records an OpenAlex work, keeping its open-access PDF link for full-text reading."""
     extra = {"OpenAlex": work.openalex_id}
     if work.pdf_url:
@@ -208,6 +214,7 @@ def record_openalex_work(work: openalex_client.OpenAlexWork) -> str | None:
         citation_count=work.citation_count,
         venue=work.venue,
         extra_ids=extra,
+        index=index,
     )
 
 

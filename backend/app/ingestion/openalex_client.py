@@ -79,6 +79,9 @@ class OpenAlexWork:
     # A direct open-access PDF, when one exists. This is what lets the agent read the
     # full text of a journal paper, not just arXiv preprints.
     pdf_url: str | None = None
+    # OpenAlex ids of the works this one cites. Only populated by get_work, which asks
+    # for it; searches leave it out because reference lists are large.
+    referenced_works: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -180,6 +183,7 @@ def _parse(work: dict) -> OpenAlexWork:
         doi=doi.removeprefix("https://doi.org/") if doi else None,
         arxiv_id=_arxiv_id(work),
         pdf_url=best_oa.get("pdf_url"),
+        referenced_works=[_short_id(r) for r in work.get("referenced_works") or []],
     )
 
 
@@ -266,3 +270,61 @@ def get_by_doi(doi: str) -> OpenAlexWork | None:
             return None
         raise
     return _parse(data) if data.get("display_name") else None
+
+
+# --- Citation neighbourhood ---------------------------------------------------
+#
+# The citation-graph page previously came entirely from Semantic Scholar's per-paper
+# reference and citation endpoints, which answer 429 to unauthenticated callers. A graph
+# took around 25 seconds of retries and, for most papers outside the corpus, came back
+# nearly empty. OpenAlex records each work's reference list and supports "works citing
+# X" as a filter, with no key, in two or three fast requests.
+
+_GRAPH_SELECT = _SELECT + ",referenced_works"
+
+# OpenAlex accepts up to 100 alternatives in one OR filter.
+_MAX_IDS_PER_FILTER = 100
+
+
+@cached(ttl_seconds=API_CACHE_TTL_SECONDS)
+def get_work(openalex_id: str) -> OpenAlexWork | None:
+    """One work by OpenAlex id, including its reference list."""
+    try:
+        data = _get(f"/works/{openalex_id}", {"select": _GRAPH_SELECT})
+    except requests.HTTPError as exc:
+        if exc.response is not None and exc.response.status_code == 404:
+            return None
+        raise
+    return _parse(data) if data.get("display_name") else None
+
+
+@cached(ttl_seconds=API_CACHE_TTL_SECONDS)
+def works_by_ids(openalex_ids: list[str]) -> list[OpenAlexWork]:
+    """Several works at once by OpenAlex id, in as few requests as the API allows."""
+    works: list[OpenAlexWork] = []
+    for start in range(0, len(openalex_ids), _MAX_IDS_PER_FILTER):
+        batch = openalex_ids[start:start + _MAX_IDS_PER_FILTER]
+        data = _get("/works", {
+            "filter": "openalex_id:" + "|".join(batch),
+            "per-page": len(batch),
+            "select": _SELECT,
+        })
+        works.extend(_parse(w) for w in data.get("results") or [] if w.get("display_name"))
+    return works
+
+
+@cached(ttl_seconds=API_CACHE_TTL_SECONDS)
+def citing_works(openalex_id: str, limit: int = 20) -> list[OpenAlexWork]:
+    """Works that cite this one, most-cited first.
+
+    Most-cited first because a famous paper is cited by tens of thousands of works and a
+    graph can show twenty; the twenty that are themselves most cited are the ones that
+    carried the work forward.
+    """
+    data = _get("/works", {
+        "filter": f"cites:{openalex_id}",
+        "sort": "cited_by_count:desc",
+        "per-page": limit,
+        "select": _SELECT,
+    })
+    return [_parse(w) for w in data.get("results") or [] if w.get("display_name")]
