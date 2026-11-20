@@ -57,6 +57,11 @@ RETRY_TOP_K = 8  # a corrective retry casts slightly wider than the first pass
 CANDIDATE_POOL = 60
 ARXIV_ID_PATTERN = r"\d{4}\.\d{4,5}(?:v\d+)?"
 
+# Every id form a corpus paper can carry: arXiv ids, OpenAlex work ids (journal papers
+# recorded from OpenAlex) and Semantic Scholar hashes (papers recorded from S2). Citation
+# matching that knew only the first form treated every non-arXiv citation as uncited.
+PAPER_ID_PATTERN = r"(?<![\w/.])(?:\d{4}\.\d{4,5}(?:v\d+)?|W\d{7,}|[0-9a-f]{40})(?![\w/])"
+
 # Written as a decision table rather than prose. The orchestrator runs on the cheap
 # model tier and now picks among seven tools; the earlier prose version buried the
 # deciding cue for each tool inside a paragraph, and measurably lost tool calls -
@@ -1286,8 +1291,20 @@ def _cited_or_all(answer_text: str, chunks: list[dict]) -> list[dict]:
     # tables in practice - relying purely on prompt compliance here would
     # make "cited" silently fall back to "everything retrieved" whenever the
     # model's formatting slips, which defeats the point of filtering at all.
-    cited_ids = set(re.findall(ARXIV_ID_PATTERN, answer_text))
-    cited_chunks = [c for c in chunks if c["paper_id"] in cited_ids]
+    #
+    # Compared on canonical ids and across every id form. Matching exact strings on
+    # arXiv ids only meant an answer citing "1810.04805" did not match a passage stored
+    # under "1810.04805v2", and a citation of a journal paper by its OpenAlex id did not
+    # match at all - either way the filter found nothing and fell back to listing every
+    # retrieved paper as a source, cited or not.
+    #
+    # Returned in order of first citation, so the Sources list reads in the same order
+    # as the numbered citations in the answer.
+    order: dict[str, int] = {}
+    for match in re.findall(PAPER_ID_PATTERN, answer_text):
+        order.setdefault(db.canonical_paper_id(match), len(order))
+    cited_chunks = [c for c in chunks if db.canonical_paper_id(c["paper_id"]) in order]
+    cited_chunks.sort(key=lambda c: order[db.canonical_paper_id(c["paper_id"])])
     return cited_chunks or chunks
 
 
