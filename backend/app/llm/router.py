@@ -109,9 +109,48 @@ _configure_retries()
 # tier. That provider-side caching is what actually protects our rate limits - this app-level
 # layer was solving a problem that's already solved upstream. Left commented, not deleted, in
 # case a provider/model swap ever loses prompt-caching support.
+# Google's documented placeholder for a function call whose signature is unavailable
+# because it was produced by a different model.
+_GEMINI_PLACEHOLDER_SIGNATURE = "skip_thought_signature_validator"
+
+
+def _prepare_messages(provider_name: str, messages: list[dict]) -> list[dict]:
+    """Adapts the tool-call history to what each provider accepts.
+
+    Gemini's thinking models attach a "thought signature" to every function call they
+    emit and reject any request whose history contains a function call without one
+    (HTTP 400, "Function call is missing a thought_signature"). Falling back between
+    providers mid-answer produces exactly that history: the orchestrator's first tool
+    calls come from Groq, Groq rate-limits, and the conversation moves to Gemini
+    carrying Groq's unsigned calls. Observed live once a Gemini key was added - the
+    fallback that was meant to rescue a rate-limited answer failed it instead.
+
+    So for Gemini every unsigned call gets the placeholder Google documents for
+    conversations that began on another model, and signatures Gemini produced itself
+    are passed through untouched. For other providers the Gemini-specific field is
+    removed, since Groq rejects unfamiliar fields echoed back in messages.
+    """
+    prepared = []
+    for message in messages:
+        calls = message.get("tool_calls")
+        if message.get("role") != "assistant" or not calls:
+            prepared.append(message)
+            continue
+        new_calls = []
+        for call in calls:
+            call = {k: v for k, v in call.items() if k != "extra_content" or provider_name == "gemini"}
+            if provider_name == "gemini":
+                google = dict((call.get("extra_content") or {}).get("google") or {})
+                google.setdefault("thought_signature", _GEMINI_PLACEHOLDER_SIGNATURE)
+                call["extra_content"] = {**(call.get("extra_content") or {}), "google": google}
+            new_calls.append(call)
+        prepared.append({**message, "tool_calls": new_calls})
+    return prepared
+
+
 def _call_provider(provider_name: str, model: str, messages: list[dict], tools: list[dict] | None) -> dict:
     provider = _PROVIDER_BY_NAME[provider_name]
-    kwargs = {"model": model, "messages": messages}
+    kwargs = {"model": model, "messages": _prepare_messages(provider_name, messages)}
     if tools:
         kwargs["tools"] = tools
     completion = provider.client.chat.completions.create(**kwargs)
@@ -145,7 +184,9 @@ def _call_provider_stream(provider_name: str, model: str, messages: list[dict]):
     # error) inside create() itself - iteration below just parses already-arriving
     # chunks, so a provider failing after this line means it failed mid-stream, not
     # before sending anything.
-    stream = provider.client.chat.completions.create(model=model, messages=messages, stream=True)
+    stream = provider.client.chat.completions.create(
+        model=model, messages=_prepare_messages(provider_name, messages), stream=True
+    )
     for chunk in stream:
         delta = chunk.choices[0].delta.content
         if delta:
