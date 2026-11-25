@@ -14,6 +14,8 @@ already protects the rate limits that matter, for free.
 """
 
 import logging
+import time
+import re
 
 import openai
 
@@ -157,25 +159,71 @@ def _call_provider(provider_name: str, model: str, messages: list[dict], tools: 
     return completion.model_dump()
 
 
+# When every configured provider is temporarily unavailable (rate limited or
+# overloaded), wait and go round again rather than failing the answer.
+#
+# Disabling the client library's own retries (so a rate limit can fall through to the
+# next provider at once) also removed its waiting. That is right when another provider
+# can answer, and wrong when all of them are busy at the same moment: observed with Groq
+# rate-limited and Gemini returning 503 "high demand" a second later, the user got an
+# error for an answer that would have succeeded a few seconds on. Groq even says how
+# long to wait ("Please try again in 6.1s"); that hint is used, capped.
+RETRY_ROUNDS = 3
+MAX_ROUND_WAIT = 20.0
+DEFAULT_ROUND_WAIT = 3.0
+_TRY_AGAIN_IN = re.compile(r"try again in ([\d.]+)\s*s", re.IGNORECASE)
+
+
+def _is_transient(exc: Exception) -> bool:
+    """Rate limits, overload and connection trouble clear on their own; a bad request
+    or an invalid key does not, and retrying it only wastes time."""
+    if isinstance(exc, (openai.APIConnectionError, openai.APITimeoutError)):
+        return True
+    return getattr(exc, "status_code", None) in (429, 500, 502, 503, 504)
+
+
+def _round_wait(errors: list[Exception]) -> float:
+    hints = [float(m.group(1)) for e in errors if (m := _TRY_AGAIN_IN.search(str(e)))]
+    return min(max(min(hints) if hints else DEFAULT_ROUND_WAIT, 1.0), MAX_ROUND_WAIT)
+
+
+def _no_provider_error(last_error: Exception | None) -> NoProviderAvailable:
+    if not any(p.available for p in _PROVIDERS):
+        return NoProviderAvailable(
+            "No LLM provider is configured. Set at least one of GROQ_API_KEY / "
+            "GEMINI_API_KEY / OPENROUTER_API_KEY in backend/.env."
+        )
+    # Keys are set; every provider is busy. Say that, rather than suggesting the keys
+    # are missing, which is what the old message implied.
+    return NoProviderAvailable(
+        "All configured LLM providers are busy or rate-limited right now. "
+        f"Please try again in a minute. (Last error: {str(last_error)[:200]})"
+    )
+
+
 def generate(messages: list[dict], tools: list[dict] | None = None, tier: str = "cheap") -> dict:
     """Returns the OpenAI-format completion as a plain dict, e.g.
     result["choices"][0]["message"]["content"] / ["tool_calls"]."""
     last_error: Exception | None = None
-    for provider in _PROVIDERS:
-        if not provider.available:
-            continue
-        model = provider.model_for(tier)
-        try:
-            return _call_provider(provider.name, model, messages, tools)
-        except openai.APIError as exc:
-            logger.warning("Provider %s failed (%s) - falling through", provider.name, exc)
-            last_error = exc
-            continue
+    for round_number in range(1, RETRY_ROUNDS + 1):
+        errors: list[Exception] = []
+        for provider in _PROVIDERS:
+            if not provider.available:
+                continue
+            model = provider.model_for(tier)
+            try:
+                return _call_provider(provider.name, model, messages, tools)
+            except openai.APIError as exc:
+                logger.warning("Provider %s failed (%s) - falling through", provider.name, exc)
+                errors.append(exc)
+                last_error = exc
+        if round_number == RETRY_ROUNDS or not any(_is_transient(e) for e in errors):
+            break
+        wait = _round_wait(errors)
+        logger.info("All providers busy - retrying in %.1fs (round %d/%d)", wait, round_number + 1, RETRY_ROUNDS)
+        time.sleep(wait)
 
-    raise NoProviderAvailable(
-        "No LLM provider available. Check that at least one of GROQ_API_KEY / "
-        f"GEMINI_API_KEY / OPENROUTER_API_KEY is set in .env. Last error: {last_error}"
-    )
+    raise _no_provider_error(last_error)
 
 
 def _call_provider_stream(provider_name: str, model: str, messages: list[dict]):
@@ -195,22 +243,35 @@ def _call_provider_stream(provider_name: str, model: str, messages: list[dict]):
 
 def generate_stream(messages: list[dict], tier: str = "cheap"):
     """No tool-calling support (synthesis-only, doesn't need it). Yields text deltas.
-    Provider fallback only covers failures before the first token - once a provider
-    starts streaming, this doesn't retry elsewhere mid-answer (see comment above)."""
-    last_error: Exception | None = None
-    for provider in _PROVIDERS:
-        if not provider.available:
-            continue
-        model = provider.model_for(tier)
-        try:
-            yield from _call_provider_stream(provider.name, model, messages)
-            return
-        except openai.APIError as exc:
-            logger.warning("Provider %s failed (%s) - falling through", provider.name, exc)
-            last_error = exc
-            continue
 
-    raise NoProviderAvailable(
-        "No LLM provider available. Check that at least one of GROQ_API_KEY / "
-        f"GEMINI_API_KEY / OPENROUTER_API_KEY is set in .env. Last error: {last_error}"
-    )
+    Falls back between providers, and retries in rounds when all are busy, but only
+    before the first token. Once text has been sent to the user a failure is raised as
+    is: continuing on another provider would start the answer over, and the reader would
+    see a partial answer followed by a different complete one.
+    """
+    last_error: Exception | None = None
+    for round_number in range(1, RETRY_ROUNDS + 1):
+        errors: list[Exception] = []
+        for provider in _PROVIDERS:
+            if not provider.available:
+                continue
+            model = provider.model_for(tier)
+            started = False
+            try:
+                for delta in _call_provider_stream(provider.name, model, messages):
+                    started = True
+                    yield delta
+                return
+            except openai.APIError as exc:
+                if started:
+                    raise
+                logger.warning("Provider %s failed (%s) - falling through", provider.name, exc)
+                errors.append(exc)
+                last_error = exc
+        if round_number == RETRY_ROUNDS or not any(_is_transient(e) for e in errors):
+            break
+        wait = _round_wait(errors)
+        logger.info("All providers busy - retrying in %.1fs (round %d/%d)", wait, round_number + 1, RETRY_ROUNDS)
+        time.sleep(wait)
+
+    raise _no_provider_error(last_error)

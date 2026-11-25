@@ -358,6 +358,37 @@ def _activity_label(name: str, args: dict) -> str:
     return f"Running {name}"
 
 
+# What the orchestrator re-reads on every step. Each tool result is appended to its
+# conversation and sent again on every later call, so after three or four tools a
+# single planning call was 5,500-6,200 tokens - most of Groq's 8,000 tokens-per-minute
+# free tier in one request, which is what made it rate-limit mid-answer. The
+# orchestrator only needs ids, titles and match labels to choose its next step; the
+# passages the answer is written from go to collected_chunks separately and are not
+# affected by this.
+ORCHESTRATOR_STRING_LIMITS = (240, 120, 60)
+ORCHESTRATOR_RESULT_LIMIT = 2_400
+
+
+def _shorten(value, limit: int):
+    if isinstance(value, str):
+        return value if len(value) <= limit else value[:limit] + "..."
+    if isinstance(value, list):
+        return [_shorten(v, limit) for v in value]
+    if isinstance(value, dict):
+        return {k: _shorten(v, limit) for k, v in value.items()}
+    return value
+
+
+def _compact_for_orchestrator(result) -> str:
+    # Shorten text fields harder before cutting the end off, because the end holds
+    # whole papers (ids the orchestrator may need), while long fields are abstracts.
+    for limit in ORCHESTRATOR_STRING_LIMITS:
+        text = json.dumps(_shorten(result, limit), separators=(",", ":"), ensure_ascii=False)
+        if len(text) <= ORCHESTRATOR_RESULT_LIMIT:
+            return text
+    return text[:ORCHESTRATOR_RESULT_LIMIT] + " ...[truncated; the full result is kept for the answer]"
+
+
 def _execute_tool(name: str, args: dict, collected_chunks: list[dict]) -> dict | list[dict]:
     # A tool failing (rate limit, transient network error, bad arg) shouldn't crash the
     # whole request - it should read as a normal tool result the model can react to
@@ -1171,7 +1202,7 @@ def _gather_chunks(history: list[dict]):
                 seen_calls.add(signature)
                 result = _execute_tool(tool_name, args, collected_chunks)
 
-            messages.append({"role": "tool", "tool_call_id": call["id"], "content": json.dumps(result)})
+            messages.append({"role": "tool", "tool_call_id": call["id"], "content": _compact_for_orchestrator(result)})
 
     # Safety net: query_index is a free local call (no API cost, no rate limit), so if
     # the orchestrator called a tool at all but finished without ever retrieving any
